@@ -1,0 +1,11 @@
+[package]
+name = "ririmp3"
+version = "0.1.0"
+authors = ["Chris West (Faux) <git@goeswhere.com>"]
+
+[dependencies]
+cast = "0.2"
+
+[dev-dependencies.minimp3]
+git = "https://github.com/FauxFaux/minimp3-rs"
+rev = "58d5b66a9be521cf62503b377aec502ef08febd5"
