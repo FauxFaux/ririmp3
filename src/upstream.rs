@@ -1,5 +1,3 @@
-#ifndef MINIMP3_H
-#define MINIMP3_H
 /*
     https://github.com/lieff/minimp3
     To the extent possible under law, the author(s) have dedicated all copyright and related and neighboring rights to this software to the public domain worldwide.
@@ -7,251 +5,114 @@
     See <http://creativecommons.org/publicdomain/zero/1.0/>.
 */
 
-#define MINIMP3_MAX_SAMPLES_PER_FRAME (1152*2)
+const MINIMP3_MAX_SAMPLES_PER_FRAME: usize = (1152*2);
 
-typedef struct
-{
-    int frame_bytes;
-    int channels;
-    int hz;
-    int layer;
-    int bitrate_kbps;
-} mp3dec_frame_info_t;
-
-typedef struct
-{
-    float mdct_overlap[2][9*32];
-    float qmf_state[15*2*32];
-    int reserv;
-    int free_format_bytes;
-    unsigned char header[4];
-    unsigned char reserv_buf[511];
-} mp3dec_t;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-void mp3dec_init(mp3dec_t *dec);
-int mp3dec_decode_frame(mp3dec_t *dec, const unsigned char *mp3, int mp3_bytes, short *pcm, mp3dec_frame_info_t *info);
-
-#ifdef __cplusplus
+struct FrameInfo {
+    frame_bytes: usize,
+    channels: usize,
+    hz: usize,
+    layer: usize,
+    bitrate_kbps: usize,
 }
-#endif
-#endif /*MINIMP3_H*/
 
-#ifdef MINIMP3_IMPLEMENTATION
-
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-
-#define MAX_FREE_FORMAT_FRAME_SIZE  2304    /* more than ISO spec's */
-#define MAX_FRAME_SYNC_MATCHES      10
-
-#define MAX_L3_FRAME_PAYLOAD_BYTES  MAX_FREE_FORMAT_FRAME_SIZE /* MUST be >= 320000/8/32000*1152 = 1440 */
-
-#define MAX_BITRESERVOIR_BYTES      511
-#define SHORT_BLOCK_TYPE            2
-#define STOP_BLOCK_TYPE             3
-#define MODE_MONO                   3
-#define MODE_JOINT_STEREO           1
-#define HDR_SIZE                    4
-#define HDR_IS_MONO(h)              (((h[3]) & 0xC0) == 0xC0)
-#define HDR_IS_MS_STEREO(h)         (((h[3]) & 0xE0) == 0x60)
-#define HDR_IS_FREE_FORMAT(h)       (((h[2]) & 0xF0) == 0)
-#define HDR_IS_CRC(h)               (!((h[1]) & 1))
-#define HDR_TEST_PADDING(h)         ((h[2]) & 0x2)
-#define HDR_TEST_MPEG1(h)           ((h[1]) & 0x8)
-#define HDR_TEST_NOT_MPEG25(h)      ((h[1]) & 0x10)
-#define HDR_TEST_I_STEREO(h)        ((h[3]) & 0x10)
-#define HDR_TEST_MS_STEREO(h)       ((h[3]) & 0x20)
-#define HDR_GET_STEREO_MODE(h)      (((h[3]) >> 6) & 3)
-#define HDR_GET_STEREO_MODE_EXT(h)  (((h[3]) >> 4) & 3)
-#define HDR_GET_LAYER(h)            (((h[1]) >> 1) & 3)
-#define HDR_GET_BITRATE(h)          ((h[2]) >> 4)
-#define HDR_GET_SAMPLE_RATE(h)      (((h[2]) >> 2) & 3)
-#define HDR_GET_MY_SAMPLE_RATE(h)   (HDR_GET_SAMPLE_RATE(h) + (((h[1] >> 3) & 1) +  ((h[1] >> 4) & 1))*3)
-#define HDR_IS_FRAME_576(h)         ((h[1] & 14) == 2)
-#define HDR_IS_LAYER_1(h)           ((h[1] & 6) == 6)
-
-#define BITS_DEQUANTIZER_OUT        -1
-#define MAX_SCF                     (255 + BITS_DEQUANTIZER_OUT*4 - 210)
-#define MAX_SCFI                    ((MAX_SCF + 3) & ~3)
-
-#define MINIMP3_MIN(a, b)           ((a) > (b) ? (b) : (a))
-#define MINIMP3_MAX(a, b)           ((a) < (b) ? (b) : (a))
-
-#if !defined(MINIMP3_NO_SIMD)
-
-#if !defined(MINIMP3_ONLY_SIMD) && (defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || defined(__aarch64__))
-/* x64 always have SSE2, arm64 always have neon, no need for generic code */
-#define MINIMP3_ONLY_SIMD
-#endif
-
-#if (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))) || ((defined(__i386__) || defined(__x86_64__)) && defined(__SSE2__))
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
-#include <immintrin.h>
-#define HAVE_SSE 1
-#define HAVE_SIMD 1
-#define VSTORE _mm_storeu_ps
-#define VLD _mm_loadu_ps
-#define VSET _mm_set1_ps
-#define VADD _mm_add_ps
-#define VSUB _mm_sub_ps
-#define VMUL _mm_mul_ps
-#define VMAC(a, x, y) _mm_add_ps(a, _mm_mul_ps(x, y))
-#define VMSB(a, x, y) _mm_sub_ps(a, _mm_mul_ps(x, y))
-#define VMUL_S(x, s)  _mm_mul_ps(x, _mm_set1_ps(s))
-#define VREV(x) _mm_shuffle_ps(x, x, _MM_SHUFFLE(0, 1, 2, 3))
-typedef __m128 f4;
-#if defined(_MSC_VER) || defined(MINIMP3_ONLY_SIMD)
-#define minimp3_cpuid __cpuid
-#else
-static __inline__ __attribute__((always_inline)) void minimp3_cpuid(int CPUInfo[], const int InfoType)
-{
-#if defined(__PIC__)
-    __asm__ __volatile__(
-#if defined(__x86_64__)
-        "push %%rbx\n"
-        "cpuid\n"
-        "xchgl %%ebx, %1\n"
-        "pop  %%rbx\n"
-#else
-        "xchgl %%ebx, %1\n"
-        "cpuid\n"
-        "xchgl %%ebx, %1\n"
-#endif
-        : "=a" (CPUInfo[0]), "=r" (CPUInfo[1]), "=c" (CPUInfo[2]), "=d" (CPUInfo[3])
-        : "a" (InfoType));
-#else
-    __asm__ __volatile__(
-        "cpuid"
-        : "=a" (CPUInfo[0]), "=b" (CPUInfo[1]), "=c" (CPUInfo[2]), "=d" (CPUInfo[3])
-        : "a" (InfoType));
-#endif
+struct Context {
+    mdct_overlap: [[f32; 9*32]; 2],
+    qmf_state: [f32; 15*2*32],
+    reserv: usize,
+    free_format_bytes: usize,
+    header: [u8; 4],
+    reserv_buf: [u8; 511],
 }
-#endif
-static int have_simd()
+
+const MAX_FREE_FORMAT_FRAME_SIZE: usize =  2304;    /* more than ISO spec's */
+const MAX_FRAME_SYNC_MATCHES: usize =      10;
+
+const MAX_L3_FRAME_PAYLOAD_BYTES: usize =  MAX_FREE_FORMAT_FRAME_SIZE; /* MUST be >= 320000/8/32000*1152 = 1440 */
+
+const MAX_BITRESERVOIR_BYTES      :usize = 511;
+const SHORT_BLOCK_TYPE          :usize =   2;
+const STOP_BLOCK_TYPE           :usize =   3;
+const MODE_MONO                 :usize =   3;
+const MODE_JOINT_STEREO         :usize =   1;
+const HDR_SIZE                  :usize =   4;
+fn HDR_IS_MONO(h: &[u8]) -> bool {             (((h[3]) & 0xC0) == 0xC0) }
+fn HDR_IS_MS_STEREO(h: &[u8]) -> bool {        (((h[3]) & 0xE0) == 0x60) }
+fn HDR_IS_FREE_FORMAT(h: &[u8]) -> bool {      (((h[2]) & 0xF0) == 0) }
+fn HDR_IS_CRC(h: &[u8]) -> u8 {              (!((h[1]) & 1)) }
+fn HDR_TEST_PADDING(h: &[u8]) -> u8 {        ((h[2]) & 0x2) }
+fn HDR_TEST_MPEG1(h: &[u8]) -> u8 {          ((h[1]) & 0x8) }
+fn HDR_TEST_NOT_MPEG25(h: &[u8]) -> u8 {     ((h[1]) & 0x10) }
+fn HDR_TEST_I_STEREO(h: &[u8]) -> u8 {       ((h[3]) & 0x10) }
+fn HDR_TEST_MS_STEREO(h: &[u8]) -> u8 {      ((h[3]) & 0x20) }
+fn HDR_GET_STEREO_MODE(h: &[u8]) -> u8 {     (((h[3]) >> 6) & 3) }
+fn HDR_GET_STEREO_MODE_EXT(h: &[u8]) -> u8 { (((h[3]) >> 4) & 3) }
+fn HDR_GET_LAYER(h: &[u8]) -> u8 {           (((h[1]) >> 1) & 3) }
+fn HDR_GET_BITRATE(h: &[u8]) -> u8 {         ((h[2]) >> 4) }
+fn HDR_GET_SAMPLE_RATE(h: &[u8]) -> u8 {     (((h[2]) >> 2) & 3) }
+fn HDR_GET_MY_SAMPLE_RATE(h: &[u8]) -> u8 {  (HDR_GET_SAMPLE_RATE(h) + (((h[1] >> 3) & 1) +  ((h[1] >> 4) & 1))*3) }
+fn HDR_IS_FRAME_576(h: &[u8]) -> bool {        ((h[1] & 14) == 2) }
+fn HDR_IS_LAYER_1(h: &[u8]) -> bool {          ((h[1] & 6) == 6) }
+
+const BITS_DEQUANTIZER_OUT  :usize =      -1;
+const MAX_SCF               :usize =      (255 + BITS_DEQUANTIZER_OUT*4 - 210);
+const MAX_SCFI              :usize =      ((MAX_SCF + 3) & !3);
+
+struct Bs<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    limit: usize,
+}
+
+struct ScaleInfo {
+    total_bands: u8,
+    stereo_bands: u8,
+    bitalloc: [u8; 64],
+    scfcod: [u8; 64],
+    scf: [f32; 3*64],
+}
+
+struct SubbandAlloc {
+    tab_offset: u8,
+    code_tab_width: u8,
+    band_count: u8,
+}
+
+struct GrInfo<'a> {
+    sfbtab: &'a [u8],
+    part_23_length: u16,
+    big_values: u16,
+    scalefac_compress: u16,
+    global_gain: u8,
+    block_type: u8,
+    mixed_block_flag: u8,
+    n_long_sfb: u8,
+    n_short_sfb: u8,
+    table_select: [u8; 3],
+    region_count: [u8; 3],
+    subblock_gain: [u8; 3],
+    preflag: u8,
+    scalefac_scale: u8,
+    count1_table: u8,
+    scfsi: u8,
+}
+
+struct Scratch {
+    bs: Bs,
+    maindata: [u8; MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES],
+    gr_info: [GrInfo; 4],
+    grbuf: [[f32; 576]; 2],
+    scf: [f32; 40],
+    ist_pos: [[u8; 39]; 2],
+    syn: [[f32; 2*32]; 18 + 15],
+}
+
+fn bs_init(data: &[u8], bytes: usize) -> Bs
 {
-#ifdef MINIMP3_ONLY_SIMD
-    return 1;
-#else
-    static int g_have_simd;
-    int CPUInfo[4];
-#ifdef MINIMP3_TEST
-    static int g_counter;
-    if (g_counter++ > 100)
-        goto test_nosimd;
-#endif
-    if (g_have_simd)
-        return g_have_simd - 1;
-    minimp3_cpuid(CPUInfo, 0);
-    if (CPUInfo[0] > 0)
-    {
-        minimp3_cpuid(CPUInfo, 1);
-        g_have_simd = (CPUInfo[3] & (1 << 26)) + 1; /* SSE2 */
-        return g_have_simd - 1;
+    Bs {
+        buf: data,
+        pos: 0,
+        limit: bytes * 8,
     }
-#ifdef MINIMP3_TEST
-test_nosimd:
-#endif
-    g_have_simd = 1;
-    return 0;
-#endif
-}
-#elif defined(__ARM_NEON) || defined(__aarch64__)
-#include <arm_neon.h>
-#define HAVE_SIMD 1
-#define VSTORE vst1q_f32
-#define VLD vld1q_f32
-#define VSET vmovq_n_f32
-#define VADD vaddq_f32
-#define VSUB vsubq_f32
-#define VMUL vmulq_f32
-#define VMAC(a, x, y) vmlaq_f32(a, x, y)
-#define VMSB(a, x, y) vmlsq_f32(a, x, y)
-#define VMUL_S(x, s)  vmulq_f32(x, vmovq_n_f32(s))
-#define VREV(x) vcombine_f32(vget_high_f32(vrev64q_f32(x)), vget_low_f32(vrev64q_f32(x)))
-typedef float32x4_t f4;
-static int have_simd()
-{   /* TODO: detect neon for !MINIMP3_ONLY_SIMD */
-    return 1;
-}
-#else
-#define HAVE_SIMD 0
-#ifdef MINIMP3_ONLY_SIMD
-#error MINIMP3_ONLY_SIMD used, but SSE/NEON not enabled
-#endif
-#endif
-
-#else
-
-#define HAVE_SIMD 0
-
-#endif
-
-typedef struct
-{
-    const uint8_t *buf;
-    int pos;
-    int limit;
-} bs_t;
-
-typedef struct
-{
-    uint8_t total_bands;
-    uint8_t stereo_bands;
-    uint8_t bitalloc[64];
-    uint8_t scfcod[64];
-    float scf[3*64];
-} L12_scale_info;
-
-typedef struct
-{
-    uint8_t tab_offset;
-    uint8_t code_tab_width;
-    uint8_t band_count;
-} L12_subband_alloc_t;
-
-typedef struct
-{
-    const uint8_t *sfbtab;
-    uint16_t part_23_length;
-    uint16_t big_values;
-    uint16_t scalefac_compress;
-    uint8_t global_gain;
-    uint8_t block_type;
-    uint8_t mixed_block_flag;
-    uint8_t n_long_sfb;
-    uint8_t n_short_sfb;
-    uint8_t table_select[3];
-    uint8_t region_count[3];
-    uint8_t subblock_gain[3];
-    uint8_t preflag;
-    uint8_t scalefac_scale;
-    uint8_t count1_table;
-    uint8_t scfsi;
-} L3_gr_info_t;
-
-typedef struct
-{
-    bs_t bs;
-    uint8_t maindata[MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES];
-    L3_gr_info_t gr_info[4];
-    float grbuf[2][576];
-    float scf[40];
-    uint8_t ist_pos[2][39];
-    float syn[18 + 15][2*32];
-} mp3dec_scratch_t;
-
-static void bs_init(bs_t *bs, const uint8_t *data, int bytes)
-{
-    bs->buf   = data;
-    bs->pos   = 0;
-    bs->limit = bytes*8;
 }
 
 static uint32_t get_bits(bs_t *bs, int n)
@@ -323,25 +184,25 @@ static int hdr_padding(const uint8_t *h)
 }
 
 #ifndef MINIMP3_ONLY_MP3
-static const L12_subband_alloc_t *L12_subband_alloc_table(const uint8_t *hdr, L12_scale_info *sci)
+static const SubbandAlloc *SubbandAllocable(const uint8_t *hdr, ScaleInfo *sci)
 {
-    const L12_subband_alloc_t *alloc;
+    const SubbandAlloc *alloc;
     int mode = HDR_GET_STEREO_MODE(hdr);
     int nbands, stereo_bands = (mode == MODE_MONO) ? 0 : (mode == MODE_JOINT_STEREO) ? (HDR_GET_STEREO_MODE_EXT(hdr) << 2) + 4 : 32;
 
     if (HDR_IS_LAYER_1(hdr))
     {
-        static const L12_subband_alloc_t g_alloc_L1[] = { { 76, 4, 32 } };
+        static const SubbandAlloc g_alloc_L1[] = { { 76, 4, 32 } };
         alloc = g_alloc_L1;
         nbands = 32;
     } else if (!HDR_TEST_MPEG1(hdr))
     {
-        static const L12_subband_alloc_t g_alloc_L2M2[] = { { 60, 4, 4 }, { 44, 3, 7 }, { 44, 2, 19 } };
+        static const SubbandAlloc g_alloc_L2M2[] = { { 60, 4, 4 }, { 44, 3, 7 }, { 44, 2, 19 } };
         alloc = g_alloc_L2M2;
         nbands = 30;
     } else
     {
-        static const L12_subband_alloc_t g_alloc_L2M1[] = { { 0, 4, 3 }, { 16, 4, 8 }, { 32, 3, 12 }, { 40, 2, 7 } };
+        static const SubbandAlloc g_alloc_L2M1[] = { { 0, 4, 3 }, { 16, 4, 8 }, { 32, 3, 12 }, { 40, 2, 7 } };
         int sample_rate_idx = HDR_GET_SAMPLE_RATE(hdr);
         unsigned kbps = hdr_bitrate_kbps(hdr) >> (int)(mode != MODE_MONO);
         if (!kbps) /* free-format */
@@ -353,7 +214,7 @@ static const L12_subband_alloc_t *L12_subband_alloc_table(const uint8_t *hdr, L1
         nbands = 27;
         if (kbps < 56)
         {
-            static const L12_subband_alloc_t g_alloc_L2M1_lowrate[] = { { 44, 4, 2 }, { 44, 3, 10 } };
+            static const SubbandAlloc g_alloc_L2M1_lowrate[] = { { 44, 4, 2 }, { 44, 3, 10 } };
             alloc = g_alloc_L2M1_lowrate;
             nbands = sample_rate_idx == 2 ? 12 : 8;
         } else if (kbps >= 96 && sample_rate_idx != 1)
@@ -392,7 +253,7 @@ static void L12_read_scalefactors(bs_t *bs, uint8_t *pba, uint8_t *scfcod, int b
     }
 }
 
-static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, L12_scale_info *sci)
+static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, ScaleInfo *sci)
 {
     static const uint8_t g_bitalloc_code_tab[] = {
         0,17, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16,
@@ -403,7 +264,7 @@ static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, L12_scale_info *sc
         0,17,18, 3,19,4,5, 6,7, 8, 9,10,11,12,13,14,
         0, 2, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16
     };
-    const L12_subband_alloc_t *subband_alloc = L12_subband_alloc_table(hdr, sci);
+    const SubbandAlloc *subband_alloc = SubbandAllocable(hdr, sci);
 
     int i, k = 0, ba_bits = 0;
     const uint8_t *ba_code_tab = g_bitalloc_code_tab;
@@ -440,7 +301,7 @@ static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, L12_scale_info *sc
     }
 }
 
-static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, int group_size)
+static int L12_dequantize_granule(float *grbuf, bs_t *bs, ScaleInfo *sci, int group_size)
 {
     int i, j, k, choff = 576;
     for (j = 0; j < 4; j++)
@@ -475,7 +336,7 @@ static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, i
     return group_size*4;
 }
 
-static void L12_apply_scf_384(L12_scale_info *sci, const float *scf, float *dst)
+static void L12_apply_scf_384(ScaleInfo *sci, const float *scf, float *dst)
 {
     int i, k;
     memcpy(dst + 576 + sci->stereo_bands*18, dst + sci->stereo_bands*18, (sci->total_bands - sci->stereo_bands)*18*sizeof(float));
@@ -490,7 +351,7 @@ static void L12_apply_scf_384(L12_scale_info *sci, const float *scf, float *dst)
 }
 #endif
 
-static int L3_read_side_info(bs_t *bs, L3_gr_info_t *gr, const uint8_t *hdr)
+static int L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr)
 {
     static const uint8_t g_scf_long[9][23] = {
         { 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 },
@@ -663,7 +524,7 @@ static float L3_ldexp_q2(float y, int exp_q2)
     return y;
 }
 
-static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const L3_gr_info_t *gr, float *scf, int ch)
+static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const GrInfo *gr, float *scf, int ch)
 {
     static const uint8_t g_scf_partitions[3][28] = {
         { 6,5,5, 5,6,5,5,5,6,5, 7,3,11,10,0,0, 7, 7, 7,0, 6, 6,6,3, 8, 8,5,0 },
@@ -749,7 +610,7 @@ static float L3_pow_43(int x)
     return g_pow43[(x + sign) >> 6]*(1.f + frac*((4.f/3) + frac*(2.f/9)))*mult;
 }
 
-static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const float *scf, int layer3gr_limit)
+static void L3_huffman(float *dst, bs_t *bs, const GrInfo *gr_info, const float *scf, int layer3gr_limit)
 {
     static const float g_pow43_signed[32] = { 0,0,1,-1,2.519842f,-2.519842f,4.326749f,-4.326749f,6.349604f,-6.349604f,8.549880f,-8.549880f,10.902724f,-10.902724f,13.390518f,-13.390518f,16.000000f,-16.000000f,18.720754f,-18.720754f,21.544347f,-21.544347f,24.463781f,-24.463781f,27.473142f,-27.473142f,30.567351f,-30.567351f,33.741992f,-33.741992f,36.993181f,-36.993181f };
     static const int16_t tab0[32] = { 0, };
@@ -942,7 +803,7 @@ static void L3_stereo_process(float *left, const uint8_t *ist_pos, const uint8_t
     }
 }
 
-static void L3_intensity_stereo(float *left, uint8_t *ist_pos, const L3_gr_info_t *gr, const uint8_t *hdr)
+static void L3_intensity_stereo(float *left, uint8_t *ist_pos, const GrInfo *gr, const uint8_t *hdr)
 {
     int max_band[3], n_sfb = gr->n_long_sfb + gr->n_short_sfb;
     int i, max_blocks = gr->n_short_sfb ? 3 : 1;
@@ -1179,7 +1040,7 @@ static void L3_imdct_gr(float *grbuf, float *overlap, unsigned block_type, unsig
         L3_imdct36(grbuf, overlap, g_mdct_window[block_type == STOP_BLOCK_TYPE], 32 - n_long_bands);
 }
 
-static void L3_save_reservoir(mp3dec_t *h, mp3dec_scratch_t *s)
+static void L3_save_reservoir(mp3dec_t *h, Scratch *s)
 {
     int pos = (s->bs.pos + 7)/8u;
     int remains = s->bs.limit/8u - pos;
@@ -1195,7 +1056,7 @@ static void L3_save_reservoir(mp3dec_t *h, mp3dec_scratch_t *s)
     h->reserv = remains;
 }
 
-static int L3_restore_reservoir(mp3dec_t *h, bs_t *bs, mp3dec_scratch_t *s, int main_data_begin)
+static int L3_restore_reservoir(mp3dec_t *h, bs_t *bs, Scratch *s, int main_data_begin)
 {
     int frame_bytes = (bs->limit - bs->pos)/8;
     int bytes_have = MINIMP3_MIN(h->reserv, main_data_begin);
@@ -1205,7 +1066,7 @@ static int L3_restore_reservoir(mp3dec_t *h, bs_t *bs, mp3dec_scratch_t *s, int 
     return h->reserv >= main_data_begin;
 }
 
-static void L3_decode(mp3dec_t *h, mp3dec_scratch_t *s, L3_gr_info_t *gr_info, int nch)
+static void L3_decode(mp3dec_t *h, Scratch *s, GrInfo *gr_info, int nch)
 {
     int ch;
 
@@ -1647,7 +1508,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short 
     int i = 0, igr, frame_size = 0, success = 1;
     const uint8_t *hdr;
     bs_t bs_frame[1];
-    mp3dec_scratch_t scratch;
+    Scratch scratch;
 
     if (mp3_bytes > 4 && dec->header[0] == 0xff && hdr_compare(dec->header, mp3))
     {
@@ -1706,7 +1567,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short 
 #ifdef MINIMP3_ONLY_MP3
         return 0;
 #else
-        L12_scale_info sci[1];
+        ScaleInfo sci[1];
         L12_read_scale_info(hdr, bs_frame, sci);
 
         memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
