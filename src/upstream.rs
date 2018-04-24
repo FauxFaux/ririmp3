@@ -5,6 +5,8 @@
     See <http://creativecommons.org/publicdomain/zero/1.0/>.
 */
 
+use cast::u32;
+
 type unsigned = u32;
 type int = i32;
 type uint32_t = u32;
@@ -82,6 +84,16 @@ struct SubbandAlloc {
     band_count: u8,
 }
 
+impl SubbandAlloc {
+    fn new(tab_offset: u8, code_tab_width: u8, band_count: u8) -> SubbandAlloc {
+        SubbandAlloc {
+            tab_offset,
+            code_tab_width,
+            band_count,
+        }
+    }
+}
+
 struct GrInfo<'a> {
     sfbtab: &'a [u8],
     part_23_length: u16,
@@ -101,8 +113,8 @@ struct GrInfo<'a> {
     scfsi: u8,
 }
 
-struct Scratch {
-    bs: Bs,
+struct Scratch<'a> {
+    bs: Bs<'a>,
     maindata: [u8; MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES],
     gr_info: [GrInfo; 4],
     grbuf: [[f32; 576]; 2],
@@ -122,18 +134,23 @@ fn bs_init(data: &[u8], bytes: usize) -> Bs
 
 fn get_bits(bs: &Bs, n: usize) -> u32
 {
-    uint32_t next, cache = 0, s = bs->pos & 7;
-    int shl = n + s;
-    const uint8_t *p = bs->buf + (bs->pos >> 3);
-    if ((bs->pos += n) > bs->limit)
+    let mut next = 0;
+    let mut cache = 0;
+    let s = bs.pos & 7;
+    let mut shl = n + s;
+    let mut p = bs.buf[(bs.pos >> 3)..];
+    if bs.pos += n > bs.limit {
         return 0;
-    next = *p++ & (255 >> s);
-    while ((shl -= 8) > 0)
-    {
-        cache |= next << shl;
-        next = *p++;
     }
-    return cache | (next >> -shl);
+    next = p[0] & (255 >> s);
+    p = p[1..];
+    while shl -= 8 > 0
+    {
+        cache |= u32(next) << shl;
+        next = p[0];
+        p = p[1..];
+    }
+    return cache | (u32(next) >> -shl);
 }
 
 fn hdr_valid(h: &[u8]) -> bool
@@ -155,61 +172,62 @@ fn hdr_compare(h1: &[u8], h2: &[u8]) -> bool
 
 fn hdr_bitrate_kbps(h: &[u8]) -> usize
 {
-    static const uint8_t halfrate[2][3][15] = {
-        { { 0,4,8,12,16,20,24,28,32,40,48,56,64,72,80 }, { 0,4,8,12,16,20,24,28,32,40,48,56,64,72,80 }, { 0,16,24,28,32,40,48,56,64,72,80,88,96,112,128 } },
-        { { 0,16,20,24,28,32,40,48,56,64,80,96,112,128,160 }, { 0,16,24,28,32,40,48,56,64,80,96,112,128,160,192 }, { 0,16,32,48,64,80,96,112,128,144,160,176,192,208,224 } },
-    };
+    let halfrate = [
+        [ [ 0,4,8,12,16,20,24,28,32,40,48,56,64,72,80 ], [ 0,4,8,12,16,20,24,28,32,40,48,56,64,72,80 ], [ 0,16,24,28,32,40,48,56,64,72,80,88,96,112,128 ] ],
+        [ [ 0,16,20,24,28,32,40,48,56,64,80,96,112,128,160 ], [ 0,16,24,28,32,40,48,56,64,80,96,112,128,160,192 ], [ 0,16,32,48,64,80,96,112,128,144,160,176,192,208,224 ] ],
+    ];
     return 2*halfrate[!!HDR_TEST_MPEG1(h)][HDR_GET_LAYER(h) - 1][HDR_GET_BITRATE(h)];
 }
 
 fn hdr_sample_rate_hz(h: &[u8]) -> unsigned
 {
-    static const unsigned g_hz[3] = { 44100, 48000, 32000 };
-    return g_hz[HDR_GET_SAMPLE_RATE(h)] >> (int)!HDR_TEST_MPEG1(h) >> (int)!HDR_TEST_NOT_MPEG25(h);
+    let g_hz = [ 44100, 48000, 32000 ];
+    return g_hz[HDR_GET_SAMPLE_RATE(h)] >> i32(!HDR_TEST_MPEG1(h)) >> i32(!HDR_TEST_NOT_MPEG25(h));
 }
 
 fn hdr_frame_samples(h: &[u8]) -> unsigned
 {
-    return HDR_IS_LAYER_1(h) ? 384 : (1152 >> (int)HDR_IS_FRAME_576(h));
+    if HDR_IS_LAYER_1(h) { 384 } else { (1152 >> i32(HDR_IS_FRAME_576(h))) }
 }
 
-fn hdr_frame_bytes(h: &[u8], int free_format_size) -> int
+fn hdr_frame_bytes(h: &[u8], free_format_size: int) -> int
 {
-    int frame_bytes = hdr_frame_samples(h)*hdr_bitrate_kbps(h)*125/hdr_sample_rate_hz(h);
+    let frame_bytes = hdr_frame_samples(h)*hdr_bitrate_kbps(h)*125/hdr_sample_rate_hz(h);
     if (HDR_IS_LAYER_1(h))
     {
-        frame_bytes &= ~3; /* slot align */
+        frame_bytes &= !3; /* slot align */
     }
-    return frame_bytes ? frame_bytes : free_format_size;
+    if frame_bytes != 0 { frame_bytes } else { free_format_size }
 }
 
 fn hdr_padding(h: &[u8]) -> int
 {
-    return HDR_TEST_PADDING(h) ? (HDR_IS_LAYER_1(h) ? 4 : 1) : 0;
+    if HDR_TEST_PADDING(h) { (if HDR_IS_LAYER_1(h) { 4 } else { 1 }) } else { 0 }
 }
 
-fn SubbandAlloc *SubbandAllocable(const uint8_t *hdr, ScaleInfo *sci) -> const
+fn SubbandAllocable(hdr: &[u8], sci: &ScaleInfo) -> &'static [SubbandAlloc]
 {
-    const SubbandAlloc *alloc;
-    int mode = HDR_GET_STEREO_MODE(hdr);
-    int nbands, stereo_bands = (mode == MODE_MONO) ? 0 : (mode == MODE_JOINT_STEREO) ? (HDR_GET_STEREO_MODE_EXT(hdr) << 2) + 4 : 32;
+    let mut alloc;
+    let mode = HDR_GET_STEREO_MODE(hdr);
+    let nbands;
+    let stereo_bands = if (mode == MODE_MONO) { 0 } else { if mode == MODE_JOINT_STEREO { (HDR_GET_STEREO_MODE_EXT(hdr) << 2) + 4 } else { 32 } };
 
     if (HDR_IS_LAYER_1(hdr))
     {
-        static const SubbandAlloc g_alloc_L1[] = { { 76, 4, 32 } };
-        alloc = g_alloc_L1;
+        let g_alloc_L1 = [ SubbandAlloc::new( 76, 4, 32 ) ];
+        alloc = &g_alloc_L1[..];
         nbands = 32;
     } else if (!HDR_TEST_MPEG1(hdr))
     {
-        static const SubbandAlloc g_alloc_L2M2[] = { { 60, 4, 4 }, { 44, 3, 7 }, { 44, 2, 19 } };
-        alloc = g_alloc_L2M2;
+        let g_alloc_L2M2 = [ SubbandAlloc::new( 60, 4, 4 ), SubbandAlloc::new( 44, 3, 7 ), SubbandAlloc::new( 44, 2, 19 ) ];
+        alloc = &g_alloc_L2M2[..];
         nbands = 30;
     } else
     {
-        static const SubbandAlloc g_alloc_L2M1[] = { { 0, 4, 3 }, { 16, 4, 8 }, { 32, 3, 12 }, { 40, 2, 7 } };
-        int sample_rate_idx = HDR_GET_SAMPLE_RATE(hdr);
-        unsigned kbps = hdr_bitrate_kbps(hdr) >> (int)(mode != MODE_MONO);
-        if (!kbps) /* free-format */
+        let g_alloc_L2M1 = [ SubbandAlloc::new( 0, 4, 3 ), SubbandAlloc::new( 16, 4, 8 ), SubbandAlloc::new( 32, 3, 12 ), SubbandAlloc::new( 40, 2, 7 ) ];
+        let sample_rate_idx = HDR_GET_SAMPLE_RATE(hdr);
+        let kbps = hdr_bitrate_kbps(hdr) >> (int)(mode != MODE_MONO);
+        if 0 == kbps /* free-format */
         {
             kbps = 192;
         }
@@ -218,17 +236,17 @@ fn SubbandAlloc *SubbandAllocable(const uint8_t *hdr, ScaleInfo *sci) -> const
         nbands = 27;
         if (kbps < 56)
         {
-            static const SubbandAlloc g_alloc_L2M1_lowrate[] = { { 44, 4, 2 }, { 44, 3, 10 } };
-            alloc = g_alloc_L2M1_lowrate;
-            nbands = sample_rate_idx == 2 ? 12 : 8;
+            let g_alloc_L2M1_lowrate = [ SubbandAlloc::new( 44, 4, 2 ), SubbandAlloc::new( 44, 3, 10 ) ];
+            alloc = &g_alloc_L2M1_lowrate[..];
+            nbands = if sample_rate_idx == 2 { 12 } else { 8 };
         } else if (kbps >= 96 && sample_rate_idx != 1)
         {
             nbands = 30;
         }
     }
 
-    sci->total_bands = (uint8_t)nbands;
-    sci->stereo_bands = (uint8_t)MINIMP3_MIN(stereo_bands, nbands);
+    sci.total_bands = u8(nbands);
+    sci.stereo_bands = u8(MINIMP3_MIN(stereo_bands, nbands));
 
     return alloc;
 }
