@@ -232,7 +232,7 @@ fn SubbandAllocable(hdr: &[u8], sci: &ScaleInfo) -> &'static [SubbandAlloc]
             kbps = 192;
         }
 
-        alloc = g_alloc_L2M1;
+        alloc = &g_alloc_L2M1[..];
         nbands = 27;
         if (kbps < 56)
         {
@@ -251,33 +251,38 @@ fn SubbandAllocable(hdr: &[u8], sci: &ScaleInfo) -> &'static [SubbandAlloc]
     return alloc;
 }
 
-fn L12_read_scalefactors(bs_t *bs, uint8_t *pba, uint8_t *scfcod, int bands, float *scf) -> void
+fn L12_read_scalefactors(bs: &Bs, mut pba: &[u8], scfcod: &[u8], bands: usize, mut scf: &mut [f32])
 {
-    static const float g_deq_L12[18*3] = {
-#define DQ(x) 9.53674316e-07f/x, 7.56931807e-07f/x, 6.00777173e-07f/x
-        DQ(3),DQ(7),DQ(15),DQ(31),DQ(63),DQ(127),DQ(255),DQ(511),DQ(1023),DQ(2047),DQ(4095),DQ(8191),DQ(16383),DQ(32767),DQ(65535),DQ(3),DQ(5),DQ(9)
-    };
-    int i, m;
-    for (i = 0; i < bands; i++)
+    fn dq1(x: u8) -> f32 { 9.53674316e-07/f32(x) }
+    fn dq2(x: u8) -> f32 { 7.56931807e-07/f32(x) }
+    fn dq3(x: u8) -> f32 { 6.00777173e-07/f32(x) }
+
+    let g_deq_L12: [f32; 18*3] = [
+        dq1(3), dq2(3), dq3(3),dq1(7), dq2(7), dq3(7),dq1(15), dq2(15), dq3(15),dq1(31), dq2(31), dq3(31),dq1(63), dq2(63), dq3(63),dq1(127), dq2(127), dq3(127),dq1(255), dq2(255), dq3(255),dq1(511), dq2(511), dq3(511),dq1(1023), dq2(1023), dq3(1023),dq1(2047), dq2(2047), dq3(2047),dq1(4095), dq2(4095), dq3(4095),dq1(8191), dq2(8191), dq3(8191),dq1(16383), dq2(16383), dq3(16383),dq1(32767), dq2(32767), dq3(32767),dq1(65535), dq2(65535), dq3(65535),dq1(3), dq2(3), dq3(3),dq1(5), dq2(5), dq3(5),dq1(9), dq2(9), dq3(9)
+    ];
+    for i in 0..bands
     {
-        float s = 0;
-        int ba = *pba++;
-        int mask = ba ? 4 + ((19 >> scfcod[i]) & 3) : 0;
-        for (m = 4; m; m >>= 1)
-        {
+        let mut s = 0.;
+        let ba = pba[0];
+        pba = &pba[1..];
+        let mask = if 0 != ba { 4 + ((19 >> scfcod[i]) & 3) } else { 0 };
+        let mut m = 4;
+        while m != 0 {
             if (mask & m)
             {
-                int b = get_bits(bs, 6);
+                let b = get_bits(bs, 6);
                 s = g_deq_L12[ba*3 - 6 + b % 3]*(1 << 21 >> b/3);
             }
-            *scf++ = s;
+            scf[0] = s;
+            scf = &mut scf[1..];
+            m >>= 1;
         }
     }
 }
 
-fn L12_read_scale_info(const uint8_t *hdr, bs_t *bs, ScaleInfo *sci) -> void
+fn L12_read_scale_info(hdr: &[u8], bs: &Bs, sci: &mut ScaleInfo) -> void
 {
-    static const uint8_t g_bitalloc_code_tab[] = {
+    let g_bitalloc_code_tab = [
         0,17, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16,
         0,17,18, 3,19,4,5, 6,7, 8, 9,10,11,12,13,16,
         0,17,18, 3,19,4,5,16,
@@ -285,41 +290,44 @@ fn L12_read_scale_info(const uint8_t *hdr, bs_t *bs, ScaleInfo *sci) -> void
         0,17,18,19, 4,5,6, 7,8, 9,10,11,12,13,14,15,
         0,17,18, 3,19,4,5, 6,7, 8, 9,10,11,12,13,14,
         0, 2, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16
-    };
-    const SubbandAlloc *subband_alloc = SubbandAllocable(hdr, sci);
+    ];
+    let mut subband_alloc = SubbandAllocable(hdr, sci);
 
-    int i, k = 0, ba_bits = 0;
-    const uint8_t *ba_code_tab = g_bitalloc_code_tab;
+    let mut i;
+    let mut k = 0;
+    let mut ba_bits = 0;
+    let mut ba_code_tab = &g_bitalloc_code_tab;
 
-    for (i = 0; i < sci->total_bands; i++)
+    for i in 0..sci.total_bands
     {
-        uint8_t ba;
+        let ba;
         if (i == k)
         {
-            k += subband_alloc->band_count;
-            ba_bits = subband_alloc->code_tab_width;
-            ba_code_tab = g_bitalloc_code_tab + subband_alloc->tab_offset;
-            subband_alloc++;
+            k += subband_alloc.band_count;
+            ba_bits = subband_alloc.code_tab_width;
+            ba_code_tab = g_bitalloc_code_tab + subband_alloc.tab_offset;
+            subband_alloc = &subband_alloc[1..];
         }
         ba = ba_code_tab[get_bits(bs, ba_bits)];
-        sci->bitalloc[2*i] = ba;
-        if (i < sci->stereo_bands)
+        sci.bitalloc[2*i] = ba;
+        if (i < sci.stereo_bands)
         {
             ba = ba_code_tab[get_bits(bs, ba_bits)];
         }
-        sci->bitalloc[2*i + 1] = sci->stereo_bands ? ba : 0;
+        sci.bitalloc[2*i + 1] = if sci.stereo_bands { ba } else { 0 };
     }
 
-    for (i = 0; i < 2*sci->total_bands; i++)
+    for i in 0..2*sci.total_bands
     {
-        sci->scfcod[i] = sci->bitalloc[i] ? HDR_IS_LAYER_1(hdr) ? 2 : get_bits(bs, 2) : 6;
+        // TODO: nested ternary?
+        sci.scfcod[i] = if sci.bitalloc[i] { if HDR_IS_LAYER_1(hdr) { 2 } else { get_bits(bs, 2) } else { 6 } };
     }
 
-    L12_read_scalefactors(bs, sci->bitalloc, sci->scfcod, sci->total_bands*2, sci->scf);
+    L12_read_scalefactors(bs, &sci.bitalloc, &sci.scfcod, usize(sci.total_bands)*2, &mut sci.scf);
 
-    for (i = sci->stereo_bands; i < sci->total_bands; i++)
+    for i in sci.stereo_bands..sci.total_bands
     {
-        sci->bitalloc[2*i + 1] = 0;
+        sci.bitalloc[2*i + 1] = 0;
     }
 }
 
@@ -329,9 +337,9 @@ fn L12_dequantize_granule(float *grbuf, bs_t *bs, ScaleInfo *sci, int group_size
     for (j = 0; j < 4; j++)
     {
         float *dst = grbuf + group_size*j;
-        for (i = 0; i < 2*sci->total_bands; i++)
+        for (i = 0; i < 2*sci.total_bands; i++)
         {
-            int ba = sci->bitalloc[i];
+            int ba = sci.bitalloc[i];
             if (ba != 0)
             {
                 if (ba < 17)
@@ -361,8 +369,8 @@ fn L12_dequantize_granule(float *grbuf, bs_t *bs, ScaleInfo *sci, int group_size
 fn L12_apply_scf_384(ScaleInfo *sci, const float *scf, float *dst) -> void
 {
     int i, k;
-    memcpy(dst + 576 + sci->stereo_bands*18, dst + sci->stereo_bands*18, (sci->total_bands - sci->stereo_bands)*18*sizeof(float));
-    for (i = 0; i < sci->total_bands; i++, dst += 18, scf += 6)
+    memcpy(dst + 576 + sci.stereo_bands*18, dst + sci.stereo_bands*18, (sci.total_bands - sci.stereo_bands)*18*sizeof(float));
+    for (i = 0; i < sci.total_bands; i++, dst += 18, scf += 6)
     {
         for (k = 0; k < 12; k++)
         {
@@ -429,70 +437,70 @@ fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
         {
             scfsi <<= 4;
         }
-        gr->part_23_length = (uint16_t)get_bits(bs, 12);
-        part_23_sum += gr->part_23_length;
-        gr->big_values = (uint16_t)get_bits(bs,  9);
-        if (gr->big_values > 288)
+        gr.part_23_length = (uint16_t)get_bits(bs, 12);
+        part_23_sum += gr.part_23_length;
+        gr.big_values = (uint16_t)get_bits(bs,  9);
+        if (gr.big_values > 288)
         {
             return -1;
         }
-        gr->global_gain = (uint8_t)get_bits(bs, 8);
-        gr->scalefac_compress = (uint16_t)get_bits(bs, HDR_TEST_MPEG1(hdr) ? 4 : 9);
-        gr->sfbtab = g_scf_long[sr_idx];
-        gr->n_long_sfb  = 22;
-        gr->n_short_sfb = 0;
+        gr.global_gain = (uint8_t)get_bits(bs, 8);
+        gr.scalefac_compress = (uint16_t)get_bits(bs, HDR_TEST_MPEG1(hdr) ? 4 : 9);
+        gr.sfbtab = g_scf_long[sr_idx];
+        gr.n_long_sfb  = 22;
+        gr.n_short_sfb = 0;
         if (get_bits(bs, 1))
         {
-            gr->block_type = (uint8_t)get_bits(bs, 2);
-            if (!gr->block_type)
+            gr.block_type = (uint8_t)get_bits(bs, 2);
+            if (!gr.block_type)
             {
                 return -1;
             }
-            gr->mixed_block_flag = (uint8_t)get_bits(bs, 1);
-            gr->region_count[0] = 7;
-            gr->region_count[1] = 255;
-            if (gr->block_type == SHORT_BLOCK_TYPE)
+            gr.mixed_block_flag = (uint8_t)get_bits(bs, 1);
+            gr.region_count[0] = 7;
+            gr.region_count[1] = 255;
+            if (gr.block_type == SHORT_BLOCK_TYPE)
             {
                 scfsi &= 0x0F0F;
-                if (!gr->mixed_block_flag)
+                if (!gr.mixed_block_flag)
                 {
-                    gr->region_count[0] = 8;
-                    gr->sfbtab = g_scf_short[sr_idx];
-                    gr->n_long_sfb = 0;
-                    gr->n_short_sfb = 39;
+                    gr.region_count[0] = 8;
+                    gr.sfbtab = g_scf_short[sr_idx];
+                    gr.n_long_sfb = 0;
+                    gr.n_short_sfb = 39;
                 } else
                 {
-                    gr->sfbtab = g_scf_mixed[sr_idx];
-                    gr->n_long_sfb = HDR_TEST_MPEG1(hdr) ? 8 : 6;
-                    gr->n_short_sfb = 30;
+                    gr.sfbtab = g_scf_mixed[sr_idx];
+                    gr.n_long_sfb = HDR_TEST_MPEG1(hdr) ? 8 : 6;
+                    gr.n_short_sfb = 30;
                 }
             }
             tables = get_bits(bs, 10);
             tables <<= 5;
-            gr->subblock_gain[0] = (uint8_t)get_bits(bs, 3);
-            gr->subblock_gain[1] = (uint8_t)get_bits(bs, 3);
-            gr->subblock_gain[2] = (uint8_t)get_bits(bs, 3);
+            gr.subblock_gain[0] = (uint8_t)get_bits(bs, 3);
+            gr.subblock_gain[1] = (uint8_t)get_bits(bs, 3);
+            gr.subblock_gain[2] = (uint8_t)get_bits(bs, 3);
         } else
         {
-            gr->block_type = 0;
-            gr->mixed_block_flag = 0;
+            gr.block_type = 0;
+            gr.mixed_block_flag = 0;
             tables = get_bits(bs, 15);
-            gr->region_count[0] = (uint8_t)get_bits(bs, 4);
-            gr->region_count[1] = (uint8_t)get_bits(bs, 3);
-            gr->region_count[2] = 255;
+            gr.region_count[0] = (uint8_t)get_bits(bs, 4);
+            gr.region_count[1] = (uint8_t)get_bits(bs, 3);
+            gr.region_count[2] = 255;
         }
-        gr->table_select[0] = (uint8_t)(tables >> 10);
-        gr->table_select[1] = (uint8_t)((tables >> 5) & 31);
-        gr->table_select[2] = (uint8_t)((tables) & 31);
-        gr->preflag = HDR_TEST_MPEG1(hdr) ? get_bits(bs, 1) : (gr->scalefac_compress >= 500);
-        gr->scalefac_scale = (uint8_t)get_bits(bs, 1);
-        gr->count1_table = (uint8_t)get_bits(bs, 1);
-        gr->scfsi = (uint8_t)((scfsi >> 12) & 15);
+        gr.table_select[0] = (uint8_t)(tables >> 10);
+        gr.table_select[1] = (uint8_t)((tables >> 5) & 31);
+        gr.table_select[2] = (uint8_t)((tables) & 31);
+        gr.preflag = HDR_TEST_MPEG1(hdr) ? get_bits(bs, 1) : (gr.scalefac_compress >= 500);
+        gr.scalefac_scale = (uint8_t)get_bits(bs, 1);
+        gr.count1_table = (uint8_t)get_bits(bs, 1);
+        gr.scfsi = (uint8_t)((scfsi >> 12) & 15);
         scfsi <<= 4;
         gr++;
     } while(--gr_count);
 
-    if (part_23_sum + bs->pos > bs->limit + main_data_begin*8)
+    if (part_23_sum + bs.pos > bs.limit + main_data_begin*8)
     {
         return -1;
     }
@@ -552,22 +560,22 @@ fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const 
         { 8,9,6,12,6,9,9,9,6,9,12,6,15,18,0,0, 6,15,12,0, 6,12,9,6, 6,18,9,0 },
         { 9,9,6,12,9,9,9,9,9,9,12,6,18,18,0,0,12,12,12,0,12, 9,9,6,15,12,9,0 }
     };
-    const uint8_t *scf_partition = g_scf_partitions[!!gr->n_short_sfb + !gr->n_long_sfb];
+    const uint8_t *scf_partition = g_scf_partitions[!!gr.n_short_sfb + !gr.n_long_sfb];
     uint8_t scf_size[4], iscf[40];
-    int i, scf_shift = gr->scalefac_scale + 1, gain_exp, scfsi = gr->scfsi;
+    int i, scf_shift = gr.scalefac_scale + 1, gain_exp, scfsi = gr.scfsi;
     float gain;
 
     if (HDR_TEST_MPEG1(hdr))
     {
         static const uint8_t g_scfc_decode[16] = { 0,1,2,3, 12,5,6,7, 9,10,11,13, 14,15,18,19 };
-        int part = g_scfc_decode[gr->scalefac_compress];
+        int part = g_scfc_decode[gr.scalefac_compress];
         scf_size[1] = scf_size[0] = (uint8_t)(part >> 2);
         scf_size[3] = scf_size[2] = (uint8_t)(part & 3);
     } else
     {
         static const uint8_t g_mod[6*4] = { 5,5,4,4,5,5,4,1,4,3,1,1,5,6,6,1,4,4,4,1,4,3,1,1 };
         int k, modprod, sfc, ist = HDR_TEST_I_STEREO(hdr) && ch;
-        sfc = gr->scalefac_compress >> ist;
+        sfc = gr.scalefac_compress >> ist;
         for (k = ist*3*4; sfc >= 0; sfc -= modprod, k += 4)
         {
             for (modprod = 1, i = 3; i >= 0; i--)
@@ -581,16 +589,16 @@ fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const 
     }
     L3_read_scalefactors(iscf, ist_pos, scf_size, scf_partition, bs, scfsi);
 
-    if (gr->n_short_sfb)
+    if (gr.n_short_sfb)
     {
         int sh = 3 - scf_shift;
-        for (i = 0; i < gr->n_short_sfb; i += 3)
+        for (i = 0; i < gr.n_short_sfb; i += 3)
         {
-            iscf[gr->n_long_sfb + i + 0] += gr->subblock_gain[0] << sh;
-            iscf[gr->n_long_sfb + i + 1] += gr->subblock_gain[1] << sh;
-            iscf[gr->n_long_sfb + i + 2] += gr->subblock_gain[2] << sh;
+            iscf[gr.n_long_sfb + i + 0] += gr.subblock_gain[0] << sh;
+            iscf[gr.n_long_sfb + i + 1] += gr.subblock_gain[1] << sh;
+            iscf[gr.n_long_sfb + i + 2] += gr.subblock_gain[2] << sh;
         }
-    } else if (gr->preflag)
+    } else if (gr.preflag)
     {
         static const uint8_t g_preamp[10] = { 1,1,1,1,2,2,3,3,3,2 };
         for (i = 0; i < 10; i++)
@@ -599,9 +607,9 @@ fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const 
         }
     }
 
-    gain_exp = gr->global_gain + BITS_DEQUANTIZER_OUT*4 - 210 - (HDR_IS_MS_STEREO(hdr) ? 2 : 0);
+    gain_exp = gr.global_gain + BITS_DEQUANTIZER_OUT*4 - 210 - (HDR_IS_MS_STEREO(hdr) ? 2 : 0);
     gain = L3_ldexp_q2(1 << (MAX_SCFI/4),  MAX_SCFI - gain_exp);
-    for (i = 0; i < (int)(gr->n_long_sfb + gr->n_short_sfb); i++)
+    for (i = 0; i < (int)(gr.n_long_sfb + gr.n_short_sfb); i++)
     {
         scf[i] = L3_ldexp_q2(gain, iscf[i] << scf_shift);
     }
@@ -658,20 +666,20 @@ fn L3_huffman(float *dst, bs_t *bs, const GrInfo *gr_info, const float *scf, int
 #define PEEK_BITS(n)  (bs_cache >> (32 - n))
 #define FLUSH_BITS(n) { bs_cache <<= (n); bs_sh += (n); }
 #define CHECK_BITS    while (bs_sh >= 0) { bs_cache |= (uint32_t)*bs_next_ptr++ << bs_sh; bs_sh -= 8; }
-#define BSPOS         ((bs_next_ptr - bs->buf)*8 - 24 + bs_sh)
+#define BSPOS         ((bs_next_ptr - bs.buf)*8 - 24 + bs_sh)
 
     float one = 0.0f;
-    int ireg = 0, big_val_cnt = gr_info->big_values;
-    const uint8_t *sfb = gr_info->sfbtab;
-    const uint8_t *bs_next_ptr = bs->buf + bs->pos/8;
-    uint32_t bs_cache = (((bs_next_ptr[0]*256u + bs_next_ptr[1])*256u + bs_next_ptr[2])*256u + bs_next_ptr[3]) << (bs->pos & 7);
-    int pairs_to_decode, np, bs_sh = (bs->pos & 7) - 8;
+    int ireg = 0, big_val_cnt = gr_info.big_values;
+    const uint8_t *sfb = gr_info.sfbtab;
+    const uint8_t *bs_next_ptr = bs.buf + bs.pos/8;
+    uint32_t bs_cache = (((bs_next_ptr[0]*256u + bs_next_ptr[1])*256u + bs_next_ptr[2])*256u + bs_next_ptr[3]) << (bs.pos & 7);
+    int pairs_to_decode, np, bs_sh = (bs.pos & 7) - 8;
     bs_next_ptr += 4;
 
     while (big_val_cnt > 0)
     {
-        int tab_num = gr_info->table_select[ireg];
-        int sfb_cnt = gr_info->region_count[ireg++];
+        int tab_num = gr_info.table_select[ireg];
+        int sfb_cnt = gr_info.region_count[ireg++];
         const short *codebook = tabindex[tab_num];
         int linbits = g_linbits[tab_num];
         do
@@ -713,7 +721,7 @@ fn L3_huffman(float *dst, bs_t *bs, const GrInfo *gr_info, const float *scf, int
 
     for (np = 1 - big_val_cnt;; dst += 4)
     {
-        const uint8_t *codebook_count1 = (gr_info->count1_table) ? tab33 : tab32;
+        const uint8_t *codebook_count1 = (gr_info.count1_table) ? tab33 : tab32;
         int leaf = codebook_count1[PEEK_BITS(4)];
         if (!(leaf & 8))
         {
@@ -735,7 +743,7 @@ fn L3_huffman(float *dst, bs_t *bs, const GrInfo *gr_info, const float *scf, int
         CHECK_BITS;
     }
 
-    bs->pos = layer3gr_limit;
+    bs.pos = layer3gr_limit;
 }
 
 fn L3_midside_stereo(float *left, int n) -> void
@@ -826,11 +834,11 @@ fn L3_stereo_process(float *left, const uint8_t *ist_pos, const uint8_t *sfb, co
 
 fn L3_intensity_stereo(float *left, uint8_t *ist_pos, const GrInfo *gr, const uint8_t *hdr) -> void
 {
-    int max_band[3], n_sfb = gr->n_long_sfb + gr->n_short_sfb;
-    int i, max_blocks = gr->n_short_sfb ? 3 : 1;
+    int max_band[3], n_sfb = gr.n_long_sfb + gr.n_short_sfb;
+    int i, max_blocks = gr.n_short_sfb ? 3 : 1;
 
-    L3_stereo_top_band(left + 576, gr->sfbtab, n_sfb, max_band);
-    if (gr->n_long_sfb)
+    L3_stereo_top_band(left + 576, gr.sfbtab, n_sfb, max_band);
+    if (gr.n_long_sfb)
     {
         max_band[0] = max_band[1] = max_band[2] = MINIMP3_MAX(MINIMP3_MAX(max_band[0], max_band[1]), max_band[2]);
     }
@@ -841,7 +849,7 @@ fn L3_intensity_stereo(float *left, uint8_t *ist_pos, const GrInfo *gr, const ui
         int prev = itop - max_blocks;
         ist_pos[itop] = max_band[i] >= prev ? default_pos : ist_pos[prev];
     }
-    L3_stereo_process(left, ist_pos, gr->sfbtab, hdr, max_band, gr[1].scalefac_compress&1);
+    L3_stereo_process(left, ist_pos, gr.sfbtab, hdr, max_band, gr[1].scalefac_compress&1);
 }
 
 fn L3_reorder(float *grbuf, float *scratch, const uint8_t *sfb) -> void
@@ -1063,8 +1071,8 @@ fn L3_imdct_gr(float *grbuf, float *overlap, unsigned block_type, unsigned n_lon
 
 fn L3_save_reservoir(mp3dec_t *h, Scratch *s) -> void
 {
-    int pos = (s->bs.pos + 7)/8u;
-    int remains = s->bs.limit/8u - pos;
+    int pos = (s.bs.pos + 7)/8u;
+    int remains = s.bs.limit/8u - pos;
     if (remains > MAX_BITRESERVOIR_BYTES)
     {
         pos += remains - MAX_BITRESERVOIR_BYTES;
@@ -1072,19 +1080,19 @@ fn L3_save_reservoir(mp3dec_t *h, Scratch *s) -> void
     }
     if (remains > 0)
     {
-        memmove(h->reserv_buf, s->maindata + pos, remains);
+        memmove(h.reserv_buf, s.maindata + pos, remains);
     }
-    h->reserv = remains;
+    h.reserv = remains;
 }
 
 fn L3_restore_reservoir(mp3dec_t *h, bs_t *bs, Scratch *s, int main_data_begin) -> int
 {
-    int frame_bytes = (bs->limit - bs->pos)/8;
-    int bytes_have = MINIMP3_MIN(h->reserv, main_data_begin);
-    memcpy(s->maindata, h->reserv_buf + MINIMP3_MAX(0, h->reserv - main_data_begin), MINIMP3_MIN(h->reserv, main_data_begin));
-    memcpy(s->maindata + bytes_have, bs->buf + bs->pos/8, frame_bytes);
-    bs_init(&s->bs, s->maindata, bytes_have + frame_bytes);
-    return h->reserv >= main_data_begin;
+    int frame_bytes = (bs.limit - bs.pos)/8;
+    int bytes_have = MINIMP3_MIN(h.reserv, main_data_begin);
+    memcpy(s.maindata, h.reserv_buf + MINIMP3_MAX(0, h.reserv - main_data_begin), MINIMP3_MIN(h.reserv, main_data_begin));
+    memcpy(s.maindata + bytes_have, bs.buf + bs.pos/8, frame_bytes);
+    bs_init(&s.bs, s.maindata, bytes_have + frame_bytes);
+    return h.reserv >= main_data_begin;
 }
 
 fn L3_decode(mp3dec_t *h, Scratch *s, GrInfo *gr_info, int nch) -> void
@@ -1093,33 +1101,33 @@ fn L3_decode(mp3dec_t *h, Scratch *s, GrInfo *gr_info, int nch) -> void
 
     for (ch = 0; ch < nch; ch++)
     {
-        int layer3gr_limit = s->bs.pos + gr_info[ch].part_23_length;
-        L3_decode_scalefactors(h->header, s->ist_pos[ch], &s->bs, gr_info + ch, s->scf, ch);
-        L3_huffman(s->grbuf[ch], &s->bs, gr_info + ch, s->scf, layer3gr_limit);
+        int layer3gr_limit = s.bs.pos + gr_info[ch].part_23_length;
+        L3_decode_scalefactors(h.header, s.ist_pos[ch], &s.bs, gr_info + ch, s.scf, ch);
+        L3_huffman(s.grbuf[ch], &s.bs, gr_info + ch, s.scf, layer3gr_limit);
     }
 
-    if (HDR_TEST_I_STEREO(h->header))
+    if (HDR_TEST_I_STEREO(h.header))
     {
-        L3_intensity_stereo(s->grbuf[0], s->ist_pos[1], gr_info, h->header);
-    } else if (HDR_IS_MS_STEREO(h->header))
+        L3_intensity_stereo(s.grbuf[0], s.ist_pos[1], gr_info, h.header);
+    } else if (HDR_IS_MS_STEREO(h.header))
     {
-        L3_midside_stereo(s->grbuf[0], 576);
+        L3_midside_stereo(s.grbuf[0], 576);
     }
 
     for (ch = 0; ch < nch; ch++, gr_info++)
     {
         int aa_bands = 31;
-        int n_long_bands = (gr_info->mixed_block_flag ? 2 : 0) << (int)(HDR_GET_MY_SAMPLE_RATE(h->header) == 2);
+        int n_long_bands = (gr_info.mixed_block_flag ? 2 : 0) << (int)(HDR_GET_MY_SAMPLE_RATE(h.header) == 2);
 
-        if (gr_info->n_short_sfb)
+        if (gr_info.n_short_sfb)
         {
             aa_bands = n_long_bands - 1;
-            L3_reorder(s->grbuf[ch] + n_long_bands*18, s->syn[0], gr_info->sfbtab + gr_info->n_long_sfb);
+            L3_reorder(s.grbuf[ch] + n_long_bands*18, s.syn[0], gr_info.sfbtab + gr_info.n_long_sfb);
         }
 
-        L3_antialias(s->grbuf[ch], aa_bands);
-        L3_imdct_gr(s->grbuf[ch], h->mdct_overlap[ch], gr_info->block_type, n_long_bands);
-        L3_change_sign(s->grbuf[ch]);
+        L3_antialias(s.grbuf[ch], aa_bands);
+        L3_imdct_gr(s.grbuf[ch], h.mdct_overlap[ch], gr_info.block_type, n_long_bands);
+        L3_change_sign(s.grbuf[ch]);
     }
 }
 
@@ -1521,7 +1529,7 @@ fn mp3d_find_frame(const uint8_t *mp3, int mp3_bytes, int *free_format_bytes, in
 
 fn mp3dec_init(mp3dec_t *dec)
 {
-    dec->header[0] = 0;
+    dec.header[0] = 0;
 }
 
 fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *pcm, mp3dec_frame_info_t *info) -> int
@@ -1531,9 +1539,9 @@ fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *
     bs_t bs_frame[1];
     Scratch scratch;
 
-    if (mp3_bytes > 4 && dec->header[0] == 0xff && hdr_compare(dec->header, mp3))
+    if (mp3_bytes > 4 && dec.header[0] == 0xff && hdr_compare(dec.header, mp3))
     {
-        frame_size = hdr_frame_bytes(mp3, dec->free_format_bytes) + hdr_padding(mp3);
+        frame_size = hdr_frame_bytes(mp3, dec.free_format_bytes) + hdr_padding(mp3);
         if (frame_size != mp3_bytes && (frame_size + HDR_SIZE > mp3_bytes || !hdr_compare(mp3, mp3 + frame_size)))
         {
             frame_size = 0;
@@ -1542,21 +1550,21 @@ fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *
     if (!frame_size)
     {
         memset(dec, 0, sizeof(mp3dec_t));
-        i = mp3d_find_frame(mp3, mp3_bytes, &dec->free_format_bytes, &frame_size);
+        i = mp3d_find_frame(mp3, mp3_bytes, &dec.free_format_bytes, &frame_size);
         if (!frame_size || i + frame_size > mp3_bytes)
         {
-            info->frame_bytes = i;
+            info.frame_bytes = i;
             return 0;
         }
     }
 
     hdr = mp3 + i;
-    memcpy(dec->header, hdr, HDR_SIZE);
-    info->frame_bytes = i + frame_size;
-    info->channels = HDR_IS_MONO(hdr) ? 1 : 2;
-    info->hz = hdr_sample_rate_hz(hdr);
-    info->layer = 4 - HDR_GET_LAYER(hdr);
-    info->bitrate_kbps = hdr_bitrate_kbps(hdr);
+    memcpy(dec.header, hdr, HDR_SIZE);
+    info.frame_bytes = i + frame_size;
+    info.channels = HDR_IS_MONO(hdr) ? 1 : 2;
+    info.hz = hdr_sample_rate_hz(hdr);
+    info.layer = 4 - HDR_GET_LAYER(hdr);
+    info.bitrate_kbps = hdr_bitrate_kbps(hdr);
 
     bs_init(bs_frame, hdr + HDR_SIZE, frame_size - HDR_SIZE);
     if (HDR_IS_CRC(hdr))
@@ -1564,10 +1572,10 @@ fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *
         get_bits(bs_frame, 16);
     }
 
-    if (info->layer == 3)
+    if (info.layer == 3)
     {
         int main_data_begin = L3_read_side_info(bs_frame, scratch.gr_info, hdr);
-        if (main_data_begin < 0 || bs_frame->pos > bs_frame->limit)
+        if (main_data_begin < 0 || bs_frame.pos > bs_frame.limit)
         {
             mp3dec_init(dec);
             return 0;
@@ -1575,11 +1583,11 @@ fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *
         success = L3_restore_reservoir(dec, bs_frame, &scratch, main_data_begin);
         if (success)
         {
-            for (igr = 0; igr < (HDR_TEST_MPEG1(hdr) ? 2 : 1); igr++, pcm += 576*info->channels)
+            for (igr = 0; igr < (HDR_TEST_MPEG1(hdr) ? 2 : 1); igr++, pcm += 576*info.channels)
             {
                 memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
-                L3_decode(dec, &scratch, scratch.gr_info + igr*info->channels, info->channels);
-                mp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 18, info->channels, pcm, scratch.syn[0]);
+                L3_decode(dec, &scratch, scratch.gr_info + igr*info.channels, info.channels);
+                mp3d_synth_granule(dec.qmf_state, scratch.grbuf[0], 18, info.channels, pcm, scratch.syn[0]);
             }
         }
         L3_save_reservoir(dec, &scratch);
@@ -1591,20 +1599,20 @@ fn mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, short *
         memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
         for (i = 0, igr = 0; igr < 3; igr++)
         {
-            if (12 == (i += L12_dequantize_granule(scratch.grbuf[0] + i, bs_frame, sci, info->layer | 1)))
+            if (12 == (i += L12_dequantize_granule(scratch.grbuf[0] + i, bs_frame, sci, info.layer | 1)))
             {
                 i = 0;
-                L12_apply_scf_384(sci, sci->scf + igr, scratch.grbuf[0]);
-                mp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 12, info->channels, pcm, scratch.syn[0]);
+                L12_apply_scf_384(sci, sci.scf + igr, scratch.grbuf[0]);
+                mp3d_synth_granule(dec.qmf_state, scratch.grbuf[0], 12, info.channels, pcm, scratch.syn[0]);
                 memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
-                pcm += 384*info->channels;
+                pcm += 384*info.channels;
             }
-            if (bs_frame->pos > bs_frame->limit)
+            if (bs_frame.pos > bs_frame.limit)
             {
                 mp3dec_init(dec);
                 return 0;
             }
         }
     }
-    return success*hdr_frame_samples(dec->header);
+    return success*hdr_frame_samples(dec.header);
 }
