@@ -320,7 +320,7 @@ fn L12_read_scale_info(hdr: &[u8], bs: &Bs, sci: &mut ScaleInfo) -> void
     for i in 0..2*sci.total_bands
     {
         // TODO: nested ternary?
-        sci.scfcod[i] = if sci.bitalloc[i] { if HDR_IS_LAYER_1(hdr) { 2 } else { get_bits(bs, 2) } else { 6 } };
+        sci.scfcod[i] = if sci.bitalloc[i] { if HDR_IS_LAYER_1(hdr) { 2 } else { get_bits(bs, 2) } } else { 6 };
     }
 
     L12_read_scalefactors(bs, &sci.bitalloc, &sci.scfcod, usize(sci.total_bands)*2, &mut sci.scf);
@@ -331,31 +331,33 @@ fn L12_read_scale_info(hdr: &[u8], bs: &Bs, sci: &mut ScaleInfo) -> void
     }
 }
 
-fn L12_dequantize_granule(float *grbuf, bs_t *bs, ScaleInfo *sci, int group_size) -> int
+fn L12_dequantize_granule(grbuf: &[f32], bs: &Bs, sci: &ScaleInfo, group_size: int) -> int
 {
-    int i, j, k, choff = 576;
-    for (j = 0; j < 4; j++)
+    let mut choff = 576;
+    for j in 0..4
     {
-        float *dst = grbuf + group_size*j;
-        for (i = 0; i < 2*sci.total_bands; i++)
+        let mut dst = &grbuf[group_size*j..];
+        for i in 0..2*sci.total_bands
         {
-            int ba = sci.bitalloc[i];
+            let ba = sci.bitalloc[i];
             if (ba != 0)
             {
                 if (ba < 17)
                 {
-                    int half = (1 << (ba - 1)) - 1;
-                    for (k = 0; k < group_size; k++)
+                    let half = (1 << (ba - 1)) - 1;
+                    for k in 0..group_size
                     {
-                        dst[k] = (float)((int)get_bits(bs, ba) - half);
+                        dst[k] = f32(i32(get_bits(bs, ba)) - half);
                     }
                 } else
                 {
-                    unsigned mod = (2 << (ba - 17)) + 1;    /* 3, 5, 9 */
-                    unsigned code = get_bits(bs, mod + 2 - (mod >> 3));  /* 5, 7, 10 */
-                    for (k = 0; k < group_size; k++, code /= mod)
+                    let mood = (2 << (ba - 17)) + 1;    /* 3, 5, 9 */
+                    let mut code = get_bits(bs, mood + 2 - (mood >> 3));  /* 5, 7, 10 */
+                    for k in 0..group_size
                     {
-                        dst[k] = (float)((int)(code % mod - mod/2));
+                        dst[k] = (float)((int)(code % mood - mood/2));
+                        // TODO: comma operator insanity
+                        code /= mood;
                     }
                 }
             }
@@ -366,60 +368,63 @@ fn L12_dequantize_granule(float *grbuf, bs_t *bs, ScaleInfo *sci, int group_size
     return group_size*4;
 }
 
-fn L12_apply_scf_384(ScaleInfo *sci, const float *scf, float *dst) -> void
+fn L12_apply_scf_384(sci: &ScaleInfo, mut scf: &[f32], mut dst: &mut f32) -> void
 {
-    int i, k;
-    memcpy(dst + 576 + sci.stereo_bands*18, dst + sci.stereo_bands*18, (sci.total_bands - sci.stereo_bands)*18*sizeof(float));
-    for (i = 0; i < sci.total_bands; i++, dst += 18, scf += 6)
+    memcpy(dst + 576 + sci.stereo_bands*18, dst + sci.stereo_bands*18, (sci.total_bands - sci.stereo_bands)*18*size_of(float));
+    for i in 0..sci.total_bands
     {
-        for (k = 0; k < 12; k++)
+        for k in 0..12
         {
             dst[k + 0]   *= scf[0];
             dst[k + 576] *= scf[3];
         }
+        dst = &dst[18..];
+        scf = &mut scf[6..];
     }
 }
 
-fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
+fn L3_read_side_info(bs: &Bs, mut grs: &mut [GrInfo], hdr: &[u8]) -> int
 {
-    static const uint8_t g_scf_long[9][23] = {
-        { 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 },
-        { 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 },
-        { 12,12,12,12,12,12,16,20,24,28,32,40,48,56,64,76,90,2,2,2,2,2,0 },
-        { 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 },
-        { 6,6,6,6,6,6,8,10,12,14,16,18,22,26,32,38,46,54,62,70,76,36,0 },
-        { 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 },
-        { 4,4,4,4,4,4,6,6,8,8,10,12,16,20,24,28,34,42,50,54,76,158,0 },
-        { 4,4,4,4,4,4,6,6,6,8,10,12,16,18,22,28,34,40,46,54,54,192,0 },
-        { 4,4,4,4,4,4,6,6,8,10,12,16,20,24,30,38,46,56,68,84,102,26,0 }
-    };
-    static const uint8_t g_scf_short[9][40] = {
-        { 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 8,8,8,8,8,8,8,8,8,12,12,12,16,16,16,20,20,20,24,24,24,28,28,28,36,36,36,2,2,2,2,2,2,2,2,2,26,26,26,0 },
-        { 4,4,4,4,4,4,4,4,4,6,6,6,6,6,6,8,8,8,10,10,10,14,14,14,18,18,18,26,26,26,32,32,32,42,42,42,18,18,18,0 },
-        { 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,32,32,32,44,44,44,12,12,12,0 },
-        { 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,22,22,22,30,30,30,56,56,56,0 },
-        { 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,6,6,6,10,10,10,12,12,12,14,14,14,16,16,16,20,20,20,26,26,26,66,66,66,0 },
-        { 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,12,12,12,16,16,16,20,20,20,26,26,26,34,34,34,42,42,42,12,12,12,0 }
-    };
-    static const uint8_t g_scf_mixed[9][40] = {
-        { 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 12,12,12,4,4,4,8,8,8,12,12,12,16,16,16,20,20,20,24,24,24,28,28,28,36,36,36,2,2,2,2,2,2,2,2,2,26,26,26,0 },
-        { 6,6,6,6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,14,14,14,18,18,18,26,26,26,32,32,32,42,42,42,18,18,18,0 },
-        { 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,32,32,32,44,44,44,12,12,12,0 },
-        { 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 },
-        { 4,4,4,4,4,4,6,6,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,22,22,22,30,30,30,56,56,56,0 },
-        { 4,4,4,4,4,4,6,6,4,4,4,6,6,6,6,6,6,10,10,10,12,12,12,14,14,14,16,16,16,20,20,20,26,26,26,66,66,66,0 },
-        { 4,4,4,4,4,4,6,6,4,4,4,6,6,6,8,8,8,12,12,12,16,16,16,20,20,20,26,26,26,34,34,34,42,42,42,12,12,12,0 }
-    };
+    let g_scf_long = [
+        [ 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 ],
+        [ 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 ],
+        [ 12,12,12,12,12,12,16,20,24,28,32,40,48,56,64,76,90,2,2,2,2,2,0 ],
+        [ 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 ],
+        [ 6,6,6,6,6,6,8,10,12,14,16,18,22,26,32,38,46,54,62,70,76,36,0 ],
+        [ 6,6,6,6,6,6,8,10,12,14,16,20,24,28,32,38,46,52,60,68,58,54,0 ],
+        [ 4,4,4,4,4,4,6,6,8,8,10,12,16,20,24,28,34,42,50,54,76,158,0 ],
+        [ 4,4,4,4,4,4,6,6,6,8,10,12,16,18,22,28,34,40,46,54,54,192,0 ],
+        [ 4,4,4,4,4,4,6,6,8,10,12,16,20,24,30,38,46,56,68,84,102,26,0 ]
+    ];
+    let g_scf_short = [
+        [ 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 8,8,8,8,8,8,8,8,8,12,12,12,16,16,16,20,20,20,24,24,24,28,28,28,36,36,36,2,2,2,2,2,2,2,2,2,26,26,26,0 ],
+        [ 4,4,4,4,4,4,4,4,4,6,6,6,6,6,6,8,8,8,10,10,10,14,14,14,18,18,18,26,26,26,32,32,32,42,42,42,18,18,18,0 ],
+        [ 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,32,32,32,44,44,44,12,12,12,0 ],
+        [ 4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,22,22,22,30,30,30,56,56,56,0 ],
+        [ 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,6,6,6,10,10,10,12,12,12,14,14,14,16,16,16,20,20,20,26,26,26,66,66,66,0 ],
+        [ 4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,8,8,8,12,12,12,16,16,16,20,20,20,26,26,26,34,34,34,42,42,42,12,12,12,0 ]
+    ];
+    let g_scf_mixed = [
+        [ 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 12,12,12,4,4,4,8,8,8,12,12,12,16,16,16,20,20,20,24,24,24,28,28,28,36,36,36,2,2,2,2,2,2,2,2,2,26,26,26,0 ],
+        [ 6,6,6,6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,14,14,14,18,18,18,26,26,26,32,32,32,42,42,42,18,18,18,0 ],
+        [ 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,32,32,32,44,44,44,12,12,12,0 ],
+        [ 6,6,6,6,6,6,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,24,24,24,30,30,30,40,40,40,18,18,18,0 ],
+        [ 4,4,4,4,4,4,6,6,4,4,4,6,6,6,8,8,8,10,10,10,12,12,12,14,14,14,18,18,18,22,22,22,30,30,30,56,56,56,0 ],
+        [ 4,4,4,4,4,4,6,6,4,4,4,6,6,6,6,6,6,10,10,10,12,12,12,14,14,14,16,16,16,20,20,20,26,26,26,66,66,66,0 ],
+        [ 4,4,4,4,4,4,6,6,4,4,4,6,6,6,8,8,8,12,12,12,16,16,16,20,20,20,26,26,26,34,34,34,42,42,42,12,12,12,0 ]
+    ];
 
-    unsigned tables, scfsi = 0;
-    int main_data_begin, part_23_sum = 0;
-    int sr_idx = HDR_GET_MY_SAMPLE_RATE(hdr);
-    int gr_count = HDR_IS_MONO(hdr) ? 1 : 2;
+    let mut tables: unsigned = 0;
+    let mut scfsi: unsigned = 0;
+    let mut main_data_begin;
+    let mut part_23_sum = 0;
+    let mut sr_idx = HDR_GET_MY_SAMPLE_RATE(hdr);
+    let mut gr_count = if HDR_IS_MONO(hdr) { 1 } else { 2 };
 
     if (HDR_TEST_MPEG1(hdr))
     {
@@ -431,8 +436,9 @@ fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
         main_data_begin = get_bits(bs, 8 + gr_count) >> gr_count;
     }
 
-    do
+    loop
     {
+        let gr = &mut grs[0];
         if (HDR_IS_MONO(hdr))
         {
             scfsi <<= 4;
@@ -445,7 +451,7 @@ fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
             return -1;
         }
         gr.global_gain = (uint8_t)get_bits(bs, 8);
-        gr.scalefac_compress = (uint16_t)get_bits(bs, HDR_TEST_MPEG1(hdr) ? 4 : 9);
+        gr.scalefac_compress = get_bits(bs, if HDR_TEST_MPEG1(hdr) { 4 } else { 9 }) as u16;
         gr.sfbtab = g_scf_long[sr_idx];
         gr.n_long_sfb  = 22;
         gr.n_short_sfb = 0;
@@ -492,13 +498,17 @@ fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
         gr.table_select[0] = (uint8_t)(tables >> 10);
         gr.table_select[1] = (uint8_t)((tables >> 5) & 31);
         gr.table_select[2] = (uint8_t)((tables) & 31);
-        gr.preflag = HDR_TEST_MPEG1(hdr) ? get_bits(bs, 1) : (gr.scalefac_compress >= 500);
+        gr.preflag = if HDR_TEST_MPEG1(hdr) { get_bits(bs, 1) } else { (gr.scalefac_compress >= 500) };
         gr.scalefac_scale = (uint8_t)get_bits(bs, 1);
         gr.count1_table = (uint8_t)get_bits(bs, 1);
         gr.scfsi = (uint8_t)((scfsi >> 12) & 15);
         scfsi <<= 4;
-        gr++;
-    } while(--gr_count);
+        grs = &mut grs[1..];
+        gr_count -= 1;
+        if 0 == gr_count {
+            break;
+        }
+    }
 
     if (part_23_sum + bs.pos > bs.limit + main_data_begin*8)
     {
@@ -508,28 +518,32 @@ fn L3_read_side_info(bs_t *bs, GrInfo *gr, const uint8_t *hdr) -> int
     return main_data_begin;
 }
 
-fn L3_read_scalefactors(uint8_t *scf, uint8_t *ist_pos, const uint8_t *scf_size, const uint8_t *scf_count, bs_t *bitbuf, int scfsi) -> void
+fn L3_read_scalefactors(scf: &mut [u8], ist_pos: &mut [u8], scf_size: &[u8], scf_count: &[u8], bitbuf: &[u8], mut scfsi: int) -> void
 {
-    int i, k;
-    for (i = 0; i < 4 && scf_count[i]; i++, scfsi *= 2)
+    let i;
+    let k;
+    for i in 0..4
     {
-        int cnt = scf_count[i];
+        if !scf_count[i] {
+            break;
+        }
+        let cnt = scf_count[i];
         if (scfsi & 8)
         {
             memcpy(scf, ist_pos, cnt);
         } else
         {
-            int bits = scf_size[i];
+            let bits = scf_size[i];
             if (!bits)
             {
                 memset(scf, 0, cnt);
                 memset(ist_pos, 0, cnt);
             } else
             {
-                int max_scf = (scfsi < 0) ? (1 << bits) - 1 : -1;
-                for (k = 0; k < cnt; k++)
+                let max_scf = if (scfsi < 0) { (1 << bits) - 1 } else { -1 };
+                for k in 0..cnt
                 {
-                    int s = get_bits(bitbuf, bits);
+                    let s = get_bits(bitbuf, bits);
                     ist_pos[k] = (s == max_scf ? -1 : s);
                     scf[k] = s;
                 }
@@ -537,52 +551,65 @@ fn L3_read_scalefactors(uint8_t *scf, uint8_t *ist_pos, const uint8_t *scf_size,
         }
         ist_pos += cnt;
         scf += cnt;
+        scfsi *= 2
     }
     scf[0] = scf[1] = scf[2] = 0;
 }
 
-fn L3_ldexp_q2(float y, int exp_q2) -> float
+fn L3_ldexp_q2(mut y: f32, mut exp_q2: int) -> float
 {
-    static const float g_expfrac[4] = { 9.31322575e-10f,7.83145814e-10f,6.58544508e-10f,5.53767716e-10f };
-    int e;
-    do
+    let g_expfrac = [ 9.31322575e-10f,7.83145814e-10f,6.58544508e-10f,5.53767716e-10f ];
+    let e;
+    loop
     {
         e = MINIMP3_MIN(30*4, exp_q2);
         y *= g_expfrac[e & 3]*(1 << 30 >> (e >> 2));
-    } while ((exp_q2 -= e) > 0);
+        if !((exp_q2 -= e) > 0) {
+            break;
+        }
+    }
     return y;
 }
 
-fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const GrInfo *gr, float *scf, int ch) -> void
+fn L3_decode_scalefactors(hdr: &[u8], ist_pos: &[u8], bs: &Bs, gr: &GrInfo, scf: &[f32], ch: int) -> void
 {
-    static const uint8_t g_scf_partitions[3][28] = {
-        { 6,5,5, 5,6,5,5,5,6,5, 7,3,11,10,0,0, 7, 7, 7,0, 6, 6,6,3, 8, 8,5,0 },
-        { 8,9,6,12,6,9,9,9,6,9,12,6,15,18,0,0, 6,15,12,0, 6,12,9,6, 6,18,9,0 },
-        { 9,9,6,12,9,9,9,9,9,9,12,6,18,18,0,0,12,12,12,0,12, 9,9,6,15,12,9,0 }
-    };
-    const uint8_t *scf_partition = g_scf_partitions[!!gr.n_short_sfb + !gr.n_long_sfb];
-    uint8_t scf_size[4], iscf[40];
-    int i, scf_shift = gr.scalefac_scale + 1, gain_exp, scfsi = gr.scfsi;
-    float gain;
+    let g_scf_partitions = [
+        [ 6,5,5, 5,6,5,5,5,6,5, 7,3,11,10,0,0, 7, 7, 7,0, 6, 6,6,3, 8, 8,5,0 ],
+        [ 8,9,6,12,6,9,9,9,6,9,12,6,15,18,0,0, 6,15,12,0, 6,12,9,6, 6,18,9,0 ],
+        [ 9,9,6,12,9,9,9,9,9,9,12,6,18,18,0,0,12,12,12,0,12, 9,9,6,15,12,9,0 ]
+    ];
+    let scf_partition = g_scf_partitions[!!gr.n_short_sfb + !gr.n_long_sfb];
+//    uint8_t scf_size[4], iscf[40];
+    let scf_shift = gr.scalefac_scale + 1;
+    let gain_exp;
+    let scfsi = gr.scfsi;
+    let gain: f32;
 
     if (HDR_TEST_MPEG1(hdr))
     {
-        static const uint8_t g_scfc_decode[16] = { 0,1,2,3, 12,5,6,7, 9,10,11,13, 14,15,18,19 };
-        int part = g_scfc_decode[gr.scalefac_compress];
+        let g_scfc_decode = [ 0,1,2,3, 12,5,6,7, 9,10,11,13, 14,15,18,19 ];
+        let part = g_scfc_decode[gr.scalefac_compress];
         scf_size[1] = scf_size[0] = (uint8_t)(part >> 2);
         scf_size[3] = scf_size[2] = (uint8_t)(part & 3);
     } else
     {
-        static const uint8_t g_mod[6*4] = { 5,5,4,4,5,5,4,1,4,3,1,1,5,6,6,1,4,4,4,1,4,3,1,1 };
-        int k, modprod, sfc, ist = HDR_TEST_I_STEREO(hdr) && ch;
-        sfc = gr.scalefac_compress >> ist;
-        for (k = ist*3*4; sfc >= 0; sfc -= modprod, k += 4)
+        let g_mod = [ 5,5,4,4,5,5,4,1,4,3,1,1,5,6,6,1,4,4,4,1,4,3,1,1 ];
+//        int k, modprod, sfc,
+        let ist = HDR_TEST_I_STEREO(hdr) && ch;
+        let mut sfc = gr.scalefac_compress >> ist;
+        let mut k = ist*3*4;
+        loop
         {
-            for (modprod = 1, i = 3; i >= 0; i--)
+            if scf < 0 {
+                break;
+            }
+            let mut modprod = 1;
+            for i in (0..=3).rev()
             {
                 scf_size[i] = (uint8_t)(sfc / modprod % g_mod[k + i]);
                 modprod *= g_mod[k + i];
             }
+            sfc -= modprod; k += 4;
         }
         scf_partition += k;
         scfsi = -16;
@@ -591,8 +618,8 @@ fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const 
 
     if (gr.n_short_sfb)
     {
-        int sh = 3 - scf_shift;
-        for (i = 0; i < gr.n_short_sfb; i += 3)
+        let sh = 3 - scf_shift;
+        for i in (0..gr.n_short_sfb).step_by(3)
         {
             iscf[gr.n_long_sfb + i + 0] += gr.subblock_gain[0] << sh;
             iscf[gr.n_long_sfb + i + 1] += gr.subblock_gain[1] << sh;
@@ -600,28 +627,27 @@ fn L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const 
         }
     } else if (gr.preflag)
     {
-        static const uint8_t g_preamp[10] = { 1,1,1,1,2,2,3,3,3,2 };
-        for (i = 0; i < 10; i++)
+        let g_preamp = [ 1,1,1,1,2,2,3,3,3,2 ];
+        for i in 0..10
         {
             iscf[11 + i] += g_preamp[i];
         }
     }
 
-    gain_exp = gr.global_gain + BITS_DEQUANTIZER_OUT*4 - 210 - (HDR_IS_MS_STEREO(hdr) ? 2 : 0);
+    gain_exp = gr.global_gain + BITS_DEQUANTIZER_OUT*4 - 210 - (if HDR_IS_MS_STEREO(hdr) { 2 } else { 0 });
     gain = L3_ldexp_q2(1 << (MAX_SCFI/4),  MAX_SCFI - gain_exp);
-    for (i = 0; i < (int)(gr.n_long_sfb + gr.n_short_sfb); i++)
+    for i in 0..(gr.n_long_sfb + gr.n_short_sfb)
     {
         scf[i] = L3_ldexp_q2(gain, iscf[i] << scf_shift);
     }
 }
 
-fn L3_pow_43(int x) -> float
+fn L3_pow_43(mut x: int) -> float
 {
-    static const float g_pow43[129] = {
+    let g_pow43 = [
         0,1,2.519842f,4.326749f,6.349604f,8.549880f,10.902724f,13.390518f,16.000000f,18.720754f,21.544347f,24.463781f,27.473142f,30.567351f,33.741992f,36.993181f,40.317474f,43.711787f,47.173345f,50.699631f,54.288352f,57.937408f,61.644865f,65.408941f,69.227979f,73.100443f,77.024898f,81.000000f,85.024491f,89.097188f,93.216975f,97.382800f,101.593667f,105.848633f,110.146801f,114.487321f,118.869381f,123.292209f,127.755065f,132.257246f,136.798076f,141.376907f,145.993119f,150.646117f,155.335327f,160.060199f,164.820202f,169.614826f,174.443577f,179.305980f,184.201575f,189.129918f,194.090580f,199.083145f,204.107210f,209.162385f,214.248292f,219.364564f,224.510845f,229.686789f,234.892058f,240.126328f,245.389280f,250.680604f,256.000000f,261.347174f,266.721841f,272.123723f,277.552547f,283.008049f,288.489971f,293.998060f,299.532071f,305.091761f,310.676898f,316.287249f,321.922592f,327.582707f,333.267377f,338.976394f,344.709550f,350.466646f,356.247482f,362.051866f,367.879608f,373.730522f,379.604427f,385.501143f,391.420496f,397.362314f,403.326427f,409.312672f,415.320884f,421.350905f,427.402579f,433.475750f,439.570269f,445.685987f,451.822757f,457.980436f,464.158883f,470.357960f,476.577530f,482.817459f,489.077615f,495.357868f,501.658090f,507.978156f,514.317941f,520.677324f,527.056184f,533.454404f,539.871867f,546.308458f,552.764065f,559.238575f,565.731879f,572.243870f,578.774440f,585.323483f,591.890898f,598.476581f,605.080431f,611.702349f,618.342238f,625.000000f,631.675540f,638.368763f,645.079578f
-    };
-    float frac;
-    int sign, mult = 256;
+    ];
+    let mut mult = 256;
 
     if (x < 129)
     {
@@ -635,7 +661,7 @@ fn L3_pow_43(int x) -> float
     }
 
     sign = 2*x & 64;
-    frac = (float)((x & 63) - sign) / ((x & ~63) + sign);
+    let frac = (float)((x & 63) - sign) / ((x & ~63) + sign);
     return g_pow43[(x + sign) >> 6]*(1.f + frac*((4.f/3) + frac*(2.f/9)))*mult;
 }
 
@@ -973,23 +999,6 @@ fn L3_imdct36(float *grbuf, float *overlap, const float *window, int nbands) -> 
 
         i = 0;
 
-#if HAVE_SIMD
-        if (have_simd()) for (; i < 8; i += 4)
-        {
-            f4 vovl = VLD(overlap + i);
-            f4 vc = VLD(co + i);
-            f4 vs = VLD(si + i);
-            f4 vr0 = VLD(g_twid9 + i);
-            f4 vr1 = VLD(g_twid9 + 9 + i);
-            f4 vw0 = VLD(window + i);
-            f4 vw1 = VLD(window + 9 + i);
-            f4 vsum = VADD(VMUL(vc, vr1), VMUL(vs, vr0));
-            VSTORE(overlap + i, VSUB(VMUL(vc, vr0), VMUL(vs, vr1)));
-            VSTORE(grbuf + i, VSUB(VMUL(vovl, vw0), VMUL(vsum, vw1)));
-            vsum = VADD(VMUL(vovl, vw1), VMUL(vsum, vw0));
-            VSTORE(grbuf + 14 - i, VREV(vsum));
-        }
-#endif
         for (; i < 9; i++)
         {
             float ovl  = overlap[i];
@@ -1137,94 +1146,7 @@ fn mp3d_DCT_II(float *grbuf, int n) -> void
         10.19000816f,0.50060302f,0.50241929f,3.40760851f,0.50547093f,0.52249861f,2.05778098f,0.51544732f,0.56694406f,1.48416460f,0.53104258f,0.64682180f,1.16943991f,0.55310392f,0.78815460f,0.97256821f,0.58293498f,1.06067765f,0.83934963f,0.62250412f,1.72244716f,0.74453628f,0.67480832f,5.10114861f
     };
     int i, k = 0;
-#if HAVE_SIMD
-    if (have_simd()) for (; k < n; k += 4)
-    {
-        f4 t[4][8], *x;
-        float *y = grbuf + k;
 
-        for (x = t[0], i = 0; i < 8; i++, x++)
-        {
-            f4 x0 = VLD(&y[i*18]);
-            f4 x1 = VLD(&y[(15 - i)*18]);
-            f4 x2 = VLD(&y[(16 + i)*18]);
-            f4 x3 = VLD(&y[(31 - i)*18]);
-            f4 t0 = VADD(x0, x3);
-            f4 t1 = VADD(x1, x2);
-            f4 t2 = VMUL_S(VSUB(x1, x2), g_sec[3*i + 0]);
-            f4 t3 = VMUL_S(VSUB(x0, x3), g_sec[3*i + 1]);
-            x[0] = VADD(t0, t1);
-            x[8] = VMUL_S(VSUB(t0, t1), g_sec[3*i + 2]);
-            x[16] = VADD(t3, t2);
-            x[24] = VMUL_S(VSUB(t3, t2), g_sec[3*i + 2]);
-        }
-        for (x = t[0], i = 0; i < 4; i++, x += 8)
-        {
-            f4 x0 = x[0], x1 = x[1], x2 = x[2], x3 = x[3], x4 = x[4], x5 = x[5], x6 = x[6], x7 = x[7], xt;
-            xt = VSUB(x0, x7); x0 = VADD(x0, x7);
-            x7 = VSUB(x1, x6); x1 = VADD(x1, x6);
-            x6 = VSUB(x2, x5); x2 = VADD(x2, x5);
-            x5 = VSUB(x3, x4); x3 = VADD(x3, x4);
-            x4 = VSUB(x0, x3); x0 = VADD(x0, x3);
-            x3 = VSUB(x1, x2); x1 = VADD(x1, x2);
-            x[0] = VADD(x0, x1);
-            x[4] = VMUL_S(VSUB(x0, x1), 0.70710677f);
-            x5 = VADD(x5, x6);
-            x6 = VMUL_S(VADD(x6, x7), 0.70710677f);
-            x7 = VADD(x7, xt);
-            x3 = VMUL_S(VADD(x3, x4), 0.70710677f);
-            x5 = VSUB(x5, VMUL_S(x7, 0.198912367f)); /* rotate by PI/8 */
-            x7 = VADD(x7, VMUL_S(x5, 0.382683432f));
-            x5 = VSUB(x5, VMUL_S(x7, 0.198912367f));
-            x0 = VSUB(xt, x6); xt = VADD(xt, x6);
-            x[1] = VMUL_S(VADD(xt, x7), 0.50979561f);
-            x[2] = VMUL_S(VADD(x4, x3), 0.54119611f);
-            x[3] = VMUL_S(VSUB(x0, x5), 0.60134488f);
-            x[5] = VMUL_S(VADD(x0, x5), 0.89997619f);
-            x[6] = VMUL_S(VSUB(x4, x3), 1.30656302f);
-            x[7] = VMUL_S(VSUB(xt, x7), 2.56291556f);
-        }
-
-        if (k > n - 3)
-        {
-#if HAVE_SSE
-#define VSAVE2(i, v) _mm_storel_pi((__m64 *)(void*)&y[i*18], v)
-#else
-#define VSAVE2(i, v) vst1_f32((float32_t *)&y[i*18],  vget_low_f32(v))
-#endif
-            for (i = 0; i < 7; i++, y += 4*18)
-            {
-                f4 s = VADD(t[3][i], t[3][i + 1]);
-                VSAVE2(0, t[0][i]);
-                VSAVE2(1, VADD(t[2][i], s));
-                VSAVE2(2, VADD(t[1][i], t[1][i + 1]));
-                VSAVE2(3, VADD(t[2][1 + i], s));
-            }
-            VSAVE2(0, t[0][7]);
-            VSAVE2(1, VADD(t[2][7], t[3][7]));
-            VSAVE2(2, t[1][7]);
-            VSAVE2(3, t[3][7]);
-        } else
-        {
-#define VSAVE4(i, v) VSTORE(&y[i*18], v)
-            for (i = 0; i < 7; i++, y += 4*18)
-            {
-                f4 s = VADD(t[3][i], t[3][i + 1]);
-                VSAVE4(0, t[0][i]);
-                VSAVE4(1, VADD(t[2][i], s));
-                VSAVE4(2, VADD(t[1][i], t[1][i + 1]));
-                VSAVE4(3, VADD(t[2][1 + i], s));
-            }
-            VSAVE4(0, t[0][7]);
-            VSAVE4(1, VADD(t[2][7], t[3][7]));
-            VSAVE4(2, t[1][7]);
-            VSAVE4(3, t[3][7]);
-        }
-    } else
-#endif
-#ifdef MINIMP3_ONLY_SIMD
-    {}
-#else
     for (; k < n; k++)
     {
         float t[4][8], *x, *y = grbuf + k;
@@ -1283,7 +1205,6 @@ fn mp3d_DCT_II(float *grbuf, int n) -> void
         y[2*18] = t[1][7];
         y[3*18] = t[3][7];
     }
-#endif
 }
 
 fn mp3d_scale_pcm(float sample) -> short
@@ -1363,60 +1284,6 @@ fn mp3d_synth(float *xl, short *dstl, int nch, float *lins) -> void
     mp3d_synth_pair(dstl, nch, lins + 4*15);
     mp3d_synth_pair(dstl + 32*nch, nch, lins + 4*15 + 64);
 
-#if HAVE_SIMD
-    if (have_simd()) for (i = 14; i >= 0; i--)
-    {
-#define VLOAD(k) f4 w0 = VSET(*w++); f4 w1 = VSET(*w++); f4 vz = VLD(&zlin[4*i - 64*k]); f4 vy = VLD(&zlin[4*i - 64*(15 - k)]);
-#define V0(k) { VLOAD(k) b =         VADD(VMUL(vz, w1), VMUL(vy, w0)) ; a =         VSUB(VMUL(vz, w0), VMUL(vy, w1));  }
-#define V1(k) { VLOAD(k) b = VADD(b, VADD(VMUL(vz, w1), VMUL(vy, w0))); a = VADD(a, VSUB(VMUL(vz, w0), VMUL(vy, w1))); }
-#define V2(k) { VLOAD(k) b = VADD(b, VADD(VMUL(vz, w1), VMUL(vy, w0))); a = VADD(a, VSUB(VMUL(vy, w1), VMUL(vz, w0))); }
-        f4 a, b;
-        zlin[4*i]     = xl[18*(31 - i)];
-        zlin[4*i + 1] = xr[18*(31 - i)];
-        zlin[4*i + 2] = xl[1 + 18*(31 - i)];
-        zlin[4*i + 3] = xr[1 + 18*(31 - i)];
-        zlin[4*i + 64] = xl[1 + 18*(1 + i)];
-        zlin[4*i + 64 + 1] = xr[1 + 18*(1 + i)];
-        zlin[4*i - 64 + 2] = xl[18*(1 + i)];
-        zlin[4*i - 64 + 3] = xr[18*(1 + i)];
-
-        V0(0) V2(1) V1(2) V2(3) V1(4) V2(5) V1(6) V2(7)
-
-        {
-#if HAVE_SSE
-            static const f4 g_max = { 32767.0f, 32767.0f, 32767.0f, 32767.0f };
-            static const f4 g_min = { -32768.0f, -32768.0f, -32768.0f, -32768.0f };
-            __m128i pcm8 = _mm_packs_epi32(_mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(a, g_max), g_min)),
-                                           _mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(b, g_max), g_min)));
-            dstr[(15 - i)*nch] = _mm_extract_epi16(pcm8, 1);
-            dstr[(17 + i)*nch] = _mm_extract_epi16(pcm8, 5);
-            dstl[(15 - i)*nch] = _mm_extract_epi16(pcm8, 0);
-            dstl[(17 + i)*nch] = _mm_extract_epi16(pcm8, 4);
-            dstr[(47 - i)*nch] = _mm_extract_epi16(pcm8, 3);
-            dstr[(49 + i)*nch] = _mm_extract_epi16(pcm8, 7);
-            dstl[(47 - i)*nch] = _mm_extract_epi16(pcm8, 2);
-            dstl[(49 + i)*nch] = _mm_extract_epi16(pcm8, 6);
-#else
-            int16x4_t pcma, pcmb;
-            a = VADD(a, VSET(0.5f));
-            b = VADD(b, VSET(0.5f));
-            pcma = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(a), vreinterpretq_s32_u32(vcltq_f32(a, VSET(0)))));
-            pcmb = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(b), vreinterpretq_s32_u32(vcltq_f32(b, VSET(0)))));
-            vst1_lane_s16(dstr + (15 - i)*nch, pcma, 1);
-            vst1_lane_s16(dstr + (17 + i)*nch, pcmb, 1);
-            vst1_lane_s16(dstl + (15 - i)*nch, pcma, 0);
-            vst1_lane_s16(dstl + (17 + i)*nch, pcmb, 0);
-            vst1_lane_s16(dstr + (47 - i)*nch, pcma, 3);
-            vst1_lane_s16(dstr + (49 + i)*nch, pcmb, 3);
-            vst1_lane_s16(dstl + (47 - i)*nch, pcma, 2);
-            vst1_lane_s16(dstl + (49 + i)*nch, pcmb, 2);
-#endif
-        }
-    } else
-#endif
-#ifdef MINIMP3_ONLY_SIMD
-    {}
-#else
     for (i = 14; i >= 0; i--)
     {
 #define LOAD(k) float w0 = *w++; float w1 = *w++; float *vz = &zlin[4*i - k*64]; float *vy = &zlin[4*i - (15 - k)*64];
@@ -1445,7 +1312,6 @@ fn mp3d_synth(float *xl, short *dstl, int nch, float *lins) -> void
         dstl[(47 - i)*nch] = mp3d_scale_pcm(a[2]);
         dstl[(49 + i)*nch] = mp3d_scale_pcm(b[2]);
     }
-#endif
 }
 
 fn mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int nch, short *pcm, float *lins) -> void
@@ -1462,7 +1328,7 @@ fn mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int nch, short
     {
         mp3d_synth(grbuf + i, pcm + 32*nch*i, nch, lins + i*64);
     }
-#ifndef MINIMP3_NONSTANDARD_BUT_LOGICAL
+//#ifndef MINIMP3_NONSTANDARD_BUT_LOGICAL
     if (nch == 1)
     {
         for (i = 0; i < 15*64; i += 2)
@@ -1470,7 +1336,7 @@ fn mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int nch, short
             qmf_state[i] = lins[nbands*64 + i];
         }
     } else
-#endif
+//#endif
     {
         memcpy(qmf_state, lins + nbands*64, sizeof(float)*15*64);
     }
