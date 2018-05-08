@@ -642,6 +642,7 @@ fn L3_decode_scalefactors(hdr: &[u8], ist_pos: &[u8], bs: &Bs, gr: &GrInfo, scf:
     }
 }
 
+/// x^(4/3). Jasus.
 fn L3_pow_43(mut x: int) -> float
 {
     let g_pow43 = [
